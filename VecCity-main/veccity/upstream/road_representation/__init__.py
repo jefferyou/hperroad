@@ -11,6 +11,7 @@ from veccity.upstream.road_representation.SARN import SARN
 from veccity.upstream.road_representation.Toast import Toast
 from veccity.upstream.road_representation.START import START
 from veccity.upstream.road_representation.HRNR import HRNR
+from veccity.upstream.road_representation.HRNR_Hyperbolic import HRNR_Hyperbolic
 from veccity.upstream.road_representation.TrajRNE import TrajRNE
 __all__ = [
     "ChebConv",
@@ -26,5 +27,6 @@ __all__ = [
     "Toast",
     "START",
     "HRNR",
+    "HRNR_Hyperbolic",
     "TrajRNE"
 ]
