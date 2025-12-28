@@ -207,6 +207,28 @@ with warnings.catch_warnings():
 
 ---
 
+### 9. 邻接矩阵类型错误 ✅
+**错误**: `AttributeError: 'list' object has no attribute 'T'`
+
+**位置**: `hrnr_dataset.py:236` in `calc_tsr()`
+
+**原因**: `self.adj_matrix` 是Python list，不是numpy数组，无法使用`.T`转置操作
+
+**修复**:
+```python
+# 修复前
+adj_sym = (self.adj_matrix + self.adj_matrix.T) / 2
+
+# 修复后
+adj_np = np.array(self.adj_matrix)
+adj_sym = (adj_np + adj_np.T) / 2
+```
+
+**影响文件**:
+- `VecCity-main/veccity/data/dataset/hrnr_dataset.py`
+
+---
+
 ## 提交历史
 
 1. **cc274ef**: Fix device mismatch in HRNR dataset
@@ -218,6 +240,8 @@ with warnings.catch_warnings():
 7. **db41624**: Update test guide - CUDA conversion fix completed
 8. **2259ad4**: Add comprehensive fixes summary document
 9. **2db06d9**: Fix BCELoss target range, deprecation warnings, and sklearn warnings
+10. **7a272b5**: Update fixes summary with 3 new fixes
+11. **4f92ea9**: Fix adjacency matrix type error in spectral clustering
 
 ---
 
@@ -235,7 +259,7 @@ with warnings.catch_warnings():
 4. **超参数优化**: Random/Grid/Bayesian搜索
 5. **可视化工具**: 训练曲线、参数重要性、消融分析等
 
-### ✅ 所有错误已修复（共8个）
+### ✅ 所有错误已修复（共9个）
 
 - 路径问题 ✅
 - 参数传递 ✅
@@ -245,6 +269,7 @@ with warnings.catch_warnings():
 - BCELoss目标值范围 ✅
 - torch.sparse弃用警告 ✅
 - sklearn谱嵌入警告 ✅
+- 邻接矩阵类型错误 ✅
 
 ---
 
