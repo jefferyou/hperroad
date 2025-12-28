@@ -207,7 +207,7 @@ class HRNRDataset(AbstractDataset):
         self._logger.info("k1: " + str(self.k1) + ", k2: " + str(self.k2) + ", k3: " + str(self.k3))
 
         NS = torch.cat([lane_emb, type_emb, length_emb, node_emb], 1)
-        AS = torch.tensor(self.adj_matrix + np.array(np.eye(self.num_nodes)), dtype=torch.float)
+        AS = torch.tensor(self.adj_matrix + np.array(np.eye(self.num_nodes)), dtype=torch.float).to(self.device)
 
         self.hidden_dims = self.config.get("hidden_dims")
         self.dropout = self.config.get("dropout")
