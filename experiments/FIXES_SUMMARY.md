@@ -129,6 +129,84 @@ def get_sparse_adj(adj, device):
 
 ---
 
+### 6. BCELoss目标值范围问题 ✅
+**错误**: `CUDA error: Assertion 'target_val >= zero && target_val <= one' failed`
+
+**位置**: `hrnr_dataset.py:259` in `calc_tsr()`
+
+**原因**: BCELoss要求目标值在[0,1]范围内，但AS张量（邻接矩阵+自环）可能包含值2
+
+**修复**:
+```python
+# 修复前
+AS = torch.tensor(self.adj_matrix + np.array(np.eye(self.num_nodes)),
+                  dtype=torch.float).to(self.device)
+
+# 修复后
+AS = torch.tensor(self.adj_matrix, dtype=torch.float).to(self.device)
+AS = AS + torch.eye(self.num_nodes, device=self.device)
+AS = torch.clamp(AS, 0, 1)  # 确保值在[0,1]范围内
+```
+
+**影响文件**:
+- `VecCity-main/veccity/data/dataset/hrnr_dataset.py`
+
+---
+
+### 7. torch.sparse弃用警告 ✅
+**警告**: `torch.sparse.SparseTensor is deprecated. Please use torch.sparse_coo_tensor`
+
+**位置**: `HRNR.py:216` in `get_sparse_adj()`
+
+**原因**: 使用了已弃用的torch.sparse.FloatTensor API
+
+**修复**:
+```python
+# 修复前
+adj = torch.sparse.FloatTensor(adj_indices, adj_values, adj_shape).to(device)
+
+# 修复后
+adj = torch.sparse_coo_tensor(adj_indices, adj_values, adj_shape,
+                              dtype=torch.float, device=device)
+```
+
+**影响文件**:
+- `VecCity-main/veccity/upstream/road_representation/HRNR.py`
+
+---
+
+### 8. sklearn谱嵌入警告 ✅
+**警告**:
+- `Array is not symmetric, and will be converted to symmetric`
+- `Graph is not fully connected, spectral embedding may not work as expected`
+- `Exited at iteration 2000... not reaching the requested tolerance`
+
+**位置**: `hrnr_dataset.py:242` in `calc_tsr()`
+
+**原因**:
+- 邻接矩阵未对称化
+- 图不完全连接（数据特性）
+- 收敛容差过于严格
+
+**修复**:
+```python
+# 对称化邻接矩阵
+adj_sym = (self.adj_matrix + self.adj_matrix.T) / 2
+
+# 抑制警告并放宽容差
+with warnings.catch_warnings():
+    warnings.filterwarnings('ignore', category=UserWarning)
+    sc = SpectralClustering(self.k2, affinity="precomputed",
+                            n_init=1, assign_labels="discretize",
+                            eigen_tol=1e-4)  # 放宽容差
+    sc.fit(adj_sym)
+```
+
+**影响文件**:
+- `VecCity-main/veccity/data/dataset/hrnr_dataset.py`
+
+---
+
 ## 提交历史
 
 1. **cc274ef**: Fix device mismatch in HRNR dataset
@@ -138,6 +216,8 @@ def get_sparse_adj(adj, device):
 5. **c333d2a**: Add quick test guide for experiment scripts
 6. **ffe0f4e**: Fix CUDA to NumPy conversion in get_sparse_adj
 7. **db41624**: Update test guide - CUDA conversion fix completed
+8. **2259ad4**: Add comprehensive fixes summary document
+9. **2db06d9**: Fix BCELoss target range, deprecation warnings, and sklearn warnings
 
 ---
 
@@ -155,13 +235,16 @@ def get_sparse_adj(adj, device):
 4. **超参数优化**: Random/Grid/Bayesian搜索
 5. **可视化工具**: 训练曲线、参数重要性、消融分析等
 
-### ✅ 所有错误已修复
+### ✅ 所有错误已修复（共8个）
 
 - 路径问题 ✅
 - 参数传递 ✅
 - Task注册 ✅
 - 设备匹配 ✅
 - CUDA转换 ✅
+- BCELoss目标值范围 ✅
+- torch.sparse弃用警告 ✅
+- sklearn谱嵌入警告 ✅
 
 ---
 
