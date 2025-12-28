@@ -289,8 +289,14 @@ class HyperbolicGraphConv(nn.Module):
 
         # 2. 在切空间中聚合邻居
         # 归一化邻接矩阵
-        deg = adj.sum(dim=1, keepdim=True) + 1e-7
-        adj_norm = adj / deg
+        # Handle sparse adjacency matrix
+        if adj.is_sparse:
+            adj_dense = adj.to_dense()
+            deg = adj_dense.sum(dim=1, keepdim=True) + 1e-7
+            adj_norm = adj_dense / deg
+        else:
+            deg = adj.sum(dim=1, keepdim=True) + 1e-7
+            adj_norm = adj / deg
 
         # 聚合
         agg = torch.matmul(adj_norm, x_tangent)  # [N, in_dim]
