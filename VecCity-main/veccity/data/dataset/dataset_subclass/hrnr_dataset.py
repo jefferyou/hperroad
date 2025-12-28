@@ -232,8 +232,9 @@ class HRNRDataset(AbstractDataset):
         TSR = None
         self._logger.info("calculating TSR...")
 
-        # Symmetrize adjacency matrix for spectral clustering
-        adj_sym = (self.adj_matrix + self.adj_matrix.T) / 2
+        # Convert adj_matrix to numpy array and symmetrize for spectral clustering
+        adj_np = np.array(self.adj_matrix)
+        adj_sym = (adj_np + adj_np.T) / 2
 
         # 谱聚类 求出M1
         # Suppress sklearn warnings about graph connectivity and convergence
