@@ -24,11 +24,21 @@ rcParams['axes.unicode_minus'] = False
 sns.set_style('whitegrid')
 sns.set_palette('husl')
 
+# 获取脚本所在目录和项目根目录
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+
 
 class ExperimentVisualizer:
     """实验结果可视化工具"""
 
-    def __init__(self, results_dir='./experiments/results', output_dir='./experiments/figures'):
+    def __init__(self, results_dir=None, output_dir=None):
+        # 使用绝对路径
+        if results_dir is None:
+            results_dir = os.path.join(PROJECT_ROOT, 'experiments', 'results')
+        if output_dir is None:
+            output_dir = os.path.join(PROJECT_ROOT, 'experiments', 'figures')
+
         self.results_dir = results_dir
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)

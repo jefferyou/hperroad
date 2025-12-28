@@ -17,8 +17,16 @@ import json
 import numpy as np
 from datetime import datetime
 
+# 获取脚本所在目录和项目根目录
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+VECCITY_ROOT = os.path.join(PROJECT_ROOT, 'VecCity-main')
+
+# 切换到VecCity根目录（VecCity期望从这里运行）
+os.chdir(VECCITY_ROOT)
+
 # 添加VecCity路径
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../VecCity-main')))
+sys.path.insert(0, VECCITY_ROOT)
 
 from veccity.pipeline import run_model
 from veccity.utils import ensure_dir
@@ -156,9 +164,10 @@ def run_multi_seed_experiments(args):
     print("Multi-seed experiment summary:")
     print("=" * 80)
 
-    # 保存结果
-    summary_file = f"./experiments/results/hrnr_hyperbolic_{args.dataset}_multi_seed_summary.json"
-    ensure_dir(os.path.dirname(summary_file))
+    # 保存结果（使用绝对路径）
+    results_dir = os.path.join(PROJECT_ROOT, 'experiments', 'results')
+    summary_file = os.path.join(results_dir, f"hrnr_hyperbolic_{args.dataset}_multi_seed_summary.json")
+    ensure_dir(results_dir)
 
     with open(summary_file, 'w') as f:
         json.dump({
@@ -230,9 +239,10 @@ def run_ablation_study(args):
             'result': result
         })
 
-    # 保存消融结果
-    ablation_file = f"./experiments/results/hrnr_hyperbolic_{args.dataset}_ablation_study.json"
-    ensure_dir(os.path.dirname(ablation_file))
+    # 保存消融结果（使用绝对路径）
+    results_dir = os.path.join(PROJECT_ROOT, 'experiments', 'results')
+    ablation_file = os.path.join(results_dir, f"hrnr_hyperbolic_{args.dataset}_ablation_study.json")
+    ensure_dir(results_dir)
 
     with open(ablation_file, 'w') as f:
         json.dump({
@@ -266,9 +276,10 @@ def run_comparison_experiment(args):
         result = run_single_experiment(args)
         results[model] = result
 
-    # 保存对比结果
-    comparison_file = f"./experiments/results/hrnr_comparison_{args.dataset}.json"
-    ensure_dir(os.path.dirname(comparison_file))
+    # 保存对比结果（使用绝对路径）
+    results_dir = os.path.join(PROJECT_ROOT, 'experiments', 'results')
+    comparison_file = os.path.join(results_dir, f"hrnr_comparison_{args.dataset}.json")
+    ensure_dir(results_dir)
 
     with open(comparison_file, 'w') as f:
         json.dump({

@@ -17,8 +17,16 @@ import numpy as np
 from datetime import datetime
 from itertools import product
 
+# 获取脚本所在目录和项目根目录
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+VECCITY_ROOT = os.path.join(PROJECT_ROOT, 'VecCity-main')
+
+# 切换到VecCity根目录（VecCity期望从这里运行）
+os.chdir(VECCITY_ROOT)
+
 # 添加VecCity路径
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../VecCity-main')))
+sys.path.insert(0, VECCITY_ROOT)
 
 from veccity.pipeline import run_model
 from veccity.utils import ensure_dir
@@ -223,9 +231,10 @@ class HyperparameterTuner:
         for key, value in self.best_trial['hyperparams'].items():
             print(f"  {key}: {value}")
 
-        # 保存结果
-        result_file = f"./experiments/results/hypertuning_{self.model}_{self.dataset}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        ensure_dir(os.path.dirname(result_file))
+        # 保存结果（使用绝对路径）
+        results_dir = os.path.join(PROJECT_ROOT, 'experiments', 'results')
+        result_file = os.path.join(results_dir, f"hypertuning_{self.model}_{self.dataset}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+        ensure_dir(results_dir)
 
         summary = {
             'task': self.task,
