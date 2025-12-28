@@ -100,7 +100,7 @@ def run_single_experiment(args):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         args.exp_id = f"hrnr_hyp_{args.dataset}_s{args.seed}_{timestamp}"
 
-    # 构建其他参数字典
+    # 构建其他参数字典（包括所有参数）
     other_args = {
         'hyperbolic_dim': args.hyperbolic_dim,
         'lambda_ce': args.lambda_ce,
@@ -108,6 +108,10 @@ def run_single_experiment(args):
         'temperature': args.temperature,
         'lp_learning_rate': args.learning_rate,
         'max_epoch': args.max_epoch,
+        'seed': args.seed,
+        'gpu': args.gpu,
+        'gpu_id': args.gpu_id,
+        'exp_id': args.exp_id,
     }
 
     # 运行模型
@@ -118,11 +122,7 @@ def run_single_experiment(args):
         config_file=args.config_file,
         saved_model=args.saved_model,
         train=args.train,
-        other_args=other_args,
-        seed=args.seed,
-        gpu_id=args.gpu_id,
-        gpu=args.gpu,
-        exp_id=args.exp_id
+        other_args=other_args
     )
 
     print("\n" + "=" * 80)

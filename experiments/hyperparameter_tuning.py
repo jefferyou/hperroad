@@ -113,8 +113,11 @@ class HyperparameterTuner:
         # 生成实验ID
         exp_id = f"tune_{self.model}_{self.dataset}_trial{trial_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+        # 将exp_id添加到配置中
+        config['exp_id'] = exp_id
+
         try:
-            # 运行模型
+            # 运行模型（所有参数通过other_args传递）
             result = run_model(
                 task=self.task,
                 model_name=self.model,
@@ -122,11 +125,7 @@ class HyperparameterTuner:
                 config_file=None,
                 saved_model=False,  # 调参时不保存所有模型
                 train=True,
-                other_args=config,
-                seed=config.get('seed', 0),
-                gpu_id=config.get('gpu_id', 0),
-                gpu=config.get('gpu', True),
-                exp_id=exp_id
+                other_args=config
             )
 
             # 提取目标指标
