@@ -201,6 +201,10 @@ class GraphEncoderTL(Module):
 
 
 def get_sparse_adj(adj, device):
+    # Convert CUDA tensor to CPU before numpy conversion
+    if isinstance(adj, torch.Tensor):
+        adj = adj.cpu().detach().numpy()
+
     self_loop = np.eye(len(adj))
     adj = np.array(adj) + self_loop
     adj = sparse.coo_matrix(adj)
