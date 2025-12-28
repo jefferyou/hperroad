@@ -285,10 +285,11 @@ class HRNRDataset(AbstractDataset):
         loss2 = torch.nn.MSELoss()
         optimizer2 = optim.Adam(RZ_GCN.parameters(), lr=1e-3)  # TODO: lr
         optimizer2.zero_grad()
-        C = torch.tensor(Utils(self.num_nodes, self.adj_matrix).get_reachable_matrix(), dtype=torch.float)
+        C = torch.tensor(Utils(self.num_nodes, self.adj_matrix).get_reachable_matrix(),
+                        dtype=torch.float, device=self.device)
         # 将频次转移矩阵转化为频率转移矩阵
         trans_matrix = self.trans_matrix / (self.trans_matrix.sum(0) + 1e-10)
-        C = C + torch.tensor(trans_matrix, dtype = torch.float) # 引入轨迹转移矩阵
+        C = C + torch.tensor(trans_matrix, dtype=torch.float, device=self.device) # 引入轨迹转移矩阵
         self._logger.info("calculating TRZ...")
         for i in range(300):  # TODO: 迭代次数
             self._logger.info("epoch " + str(i))
