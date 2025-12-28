@@ -381,6 +381,38 @@ aggregated = self.manifold.exp_map(
 
 ---
 
+### 14. 训练循环设备不匹配 ✅
+**错误**: `RuntimeError: Expected all tensors to be on the same device, but got target is on cpu, different from other tensors on cuda:0`
+
+**位置**: `HRNR_Hyperbolic.py:252` in training loop
+
+**原因**: 训练数据和标签被 clone().detach() 后没有移到 GPU，导致预测结果在 CUDA 而标签在 CPU
+
+**修复**: 在训练和评估循环中添加 `.to(self.device)` 或 `.to(device)`
+```python
+# 修复前
+train_set = train_set.clone().detach()
+train_label = train_label.clone().detach()
+
+# 修复后
+train_set = train_set.clone().detach().to(self.device)
+train_label = train_label.clone().detach().to(self.device)
+```
+
+同样在 `test_label_pred` 方法中：
+```python
+# 修复前
+test_set = test_set.clone().detach()
+
+# 修复后
+test_set = test_set.clone().detach().to(device)
+```
+
+**影响文件**:
+- `VecCity-main/veccity/upstream/road_representation/HRNR_Hyperbolic.py` (lines 247-248, 308)
+
+---
+
 ## 提交历史
 
 1. **cc274ef**: Fix device mismatch in HRNR dataset
@@ -415,7 +447,7 @@ aggregated = self.manifold.exp_map(
 4. **超参数优化**: Random/Grid/Bayesian搜索
 5. **可视化工具**: 训练曲线、参数重要性、消融分析等
 
-### ✅ 所有错误已修复（共13个）
+### ✅ 所有错误已修复（共14个）
 
 - 路径问题 ✅
 - 参数传递 ✅
@@ -430,6 +462,7 @@ aggregated = self.manifold.exp_map(
 - 稀疏张量操作错误 ✅
 - 稀疏张量性能瓶颈 ✅
 - 双曲聚合性能瓶颈 ✅
+- 训练循环设备不匹配 ✅
 
 ---
 

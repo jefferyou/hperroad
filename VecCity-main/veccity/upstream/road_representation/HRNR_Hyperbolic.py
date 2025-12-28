@@ -244,8 +244,8 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
             self._logger.info("epoch " + str(i) + ", processed " + str(count))
             for step, (train_set, train_label) in enumerate(train_dataloader):
                 model_optimizer.zero_grad()
-                train_set = train_set.clone().detach()
-                train_label = train_label.clone().detach()
+                train_set = train_set.clone().detach().to(self.device)
+                train_label = train_label.clone().detach().to(self.device)
 
                 # 分类损失
                 pred = self.encode(train_set)
@@ -305,7 +305,7 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         """评估函数"""
         right = 0
         sum_num = 0
-        test_set = test_set.clone().detach()
+        test_set = test_set.clone().detach().to(device)
         pred = self.encode(test_set)
         pred_prob = F.softmax(pred, -1)
         pred_scores = pred_prob[:, 1]
