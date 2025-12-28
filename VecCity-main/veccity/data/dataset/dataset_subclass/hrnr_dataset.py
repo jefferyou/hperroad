@@ -2,6 +2,7 @@ import os
 import pickle
 import random
 import pdb
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -207,7 +208,10 @@ class HRNRDataset(AbstractDataset):
         self._logger.info("k1: " + str(self.k1) + ", k2: " + str(self.k2) + ", k3: " + str(self.k3))
 
         NS = torch.cat([lane_emb, type_emb, length_emb, node_emb], 1)
-        AS = torch.tensor(self.adj_matrix + np.array(np.eye(self.num_nodes)), dtype=torch.float).to(self.device)
+        # Create adjacency matrix with self-loops, ensuring values are in [0, 1] for BCELoss
+        AS = torch.tensor(self.adj_matrix, dtype=torch.float).to(self.device)
+        AS = AS + torch.eye(self.num_nodes, device=self.device)
+        AS = torch.clamp(AS, 0, 1)  # Ensure values are in [0, 1] range for BCELoss
 
         self.hidden_dims = self.config.get("hidden_dims")
         self.dropout = self.config.get("dropout")
@@ -228,10 +232,17 @@ class HRNRDataset(AbstractDataset):
         TSR = None
         self._logger.info("calculating TSR...")
 
+        # Symmetrize adjacency matrix for spectral clustering
+        adj_sym = (self.adj_matrix + self.adj_matrix.T) / 2
+
         # 谱聚类 求出M1
-        sc = SpectralClustering(self.k2, affinity="precomputed",
-                                n_init=1, assign_labels="discretize")
-        sc.fit(self.adj_matrix)
+        # Suppress sklearn warnings about graph connectivity and convergence
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=UserWarning)
+            sc = SpectralClustering(self.k2, affinity="precomputed",
+                                    n_init=1, assign_labels="discretize",
+                                    eigen_tol=1e-4)  # Relaxed tolerance for faster convergence
+            sc.fit(adj_sym)
         labels = sc.labels_
         M1 = [[0 for i in range(self.k2)] for j in range(self.k1)]
         for i in range(self.k1):
