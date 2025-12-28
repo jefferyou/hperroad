@@ -263,8 +263,8 @@ def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='Hyperparameter tuning for HRNR_Hyperbolic')
 
-    parser.add_argument('--task', type=str, default='road_representation',
-                        help='Task type')
+    parser.add_argument('--task', type=str, default='segment',
+                        help='Task type (segment/parcel/poi)')
     parser.add_argument('--model', type=str, default='HRNR_Hyperbolic',
                         help='Model name')
     parser.add_argument('--dataset', type=str, default='xa',
