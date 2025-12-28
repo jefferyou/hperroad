@@ -322,6 +322,65 @@ if adj.is_sparse:
 
 ---
 
+### 13. 双曲聚合性能瓶颈（真正原因）✅
+**问题**: 训练仍然卡在 "epoch 0, processed 0"，Fix #12后依然无进度
+
+**位置**: `HRNR_Hyperbolic.py:420-464` in `HyperbolicGraphEncoderTL._aggregate_hyperbolic()`
+
+**原因**: 双重Python循环导致严重性能瓶颈。每次forward pass调用两次该方法：
+- Locality聚合：外循环300次 × 内循环~17次 = ~5100次log_map调用
+- Region聚合：外循环30次 × 内循环~10次 = ~300次log_map调用
+- **总计每次forward pass约5400次循环操作**
+
+**修复**: 使用批量矩阵操作替代双重循环
+```python
+# 修复前（双重循环，极慢）
+for i in range(M):  # M=300 or 30
+    mask = assignment_matrix[i] > 0
+    if mask.sum() == 0:
+        # 使用原点...
+    else:
+        cluster_embs = embeddings[mask]
+        weights = assignment_matrix[i][mask]
+        # ...
+        for j in range(cluster_embs.shape[0]):  # 内循环！
+            tangent_vec = self.manifold.log_map(...)
+            tangent_vecs.append(...)
+        # ...
+
+# 修复后（批量操作，快数百倍）
+# 归一化分配矩阵
+row_sums = assignment_matrix.sum(dim=1, keepdim=True) + 1e-7
+normalized_assignment = assignment_matrix / row_sums
+
+# 批量映射到切空间
+origin = torch.zeros_like(embeddings[0])
+origin[0] = 1.0
+tangent_embeddings = self.manifold.log_map(
+    origin.unsqueeze(0).expand(embeddings.shape[0], -1),
+    embeddings
+)
+
+# 矩阵乘法进行加权聚合
+aggregated_tangent = torch.matmul(normalized_assignment, tangent_embeddings)
+
+# 批量映射回双曲空间
+aggregated = self.manifold.exp_map(
+    origin.unsqueeze(0).expand(aggregated_tangent.shape[0], -1),
+    aggregated_tangent
+)
+```
+
+**性能提升**:
+- 旧版本：~5400次Python循环 + ~5400次单次log_map调用
+- 新版本：2次批量log_map + 2次矩阵乘法 + 2次批量exp_map
+- **预计提速100-1000倍**
+
+**影响文件**:
+- `VecCity-main/veccity/upstream/road_representation/HRNR_Hyperbolic.py`
+
+---
+
 ## 提交历史
 
 1. **cc274ef**: Fix device mismatch in HRNR dataset
@@ -356,7 +415,7 @@ if adj.is_sparse:
 4. **超参数优化**: Random/Grid/Bayesian搜索
 5. **可视化工具**: 训练曲线、参数重要性、消融分析等
 
-### ✅ 所有错误已修复（共12个）
+### ✅ 所有错误已修复（共13个）
 
 - 路径问题 ✅
 - 参数传递 ✅
@@ -370,6 +429,7 @@ if adj.is_sparse:
 - 设备匹配(C tensor) ✅
 - 稀疏张量操作错误 ✅
 - 稀疏张量性能瓶颈 ✅
+- 双曲聚合性能瓶颈 ✅
 
 ---
 
