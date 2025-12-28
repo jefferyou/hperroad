@@ -229,6 +229,29 @@ adj_sym = (adj_np + adj_np.T) / 2
 
 ---
 
+### 10. calc_trz中的C张量设备不匹配 ✅
+**错误**: `RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!`
+
+**位置**: `hrnr_dataset.py:301` in `calc_trz()`
+
+**原因**: C张量在CPU上创建，但_C张量通过GPU上的运算得到
+
+**修复**:
+```python
+# 修复前
+C = torch.tensor(..., dtype=torch.float)
+C = C + torch.tensor(trans_matrix, dtype=torch.float)
+
+# 修复后
+C = torch.tensor(..., dtype=torch.float, device=self.device)
+C = C + torch.tensor(trans_matrix, dtype=torch.float, device=self.device)
+```
+
+**影响文件**:
+- `VecCity-main/veccity/data/dataset/hrnr_dataset.py`
+
+---
+
 ## 提交历史
 
 1. **cc274ef**: Fix device mismatch in HRNR dataset
@@ -242,6 +265,8 @@ adj_sym = (adj_np + adj_np.T) / 2
 9. **2db06d9**: Fix BCELoss target range, deprecation warnings, and sklearn warnings
 10. **7a272b5**: Update fixes summary with 3 new fixes
 11. **4f92ea9**: Fix adjacency matrix type error in spectral clustering
+12. **9cc813b**: Add fix #9 to summary - adjacency matrix type error
+13. **75fe391**: Fix device mismatch in calc_trz - C tensor
 
 ---
 
@@ -259,17 +284,18 @@ adj_sym = (adj_np + adj_np.T) / 2
 4. **超参数优化**: Random/Grid/Bayesian搜索
 5. **可视化工具**: 训练曲线、参数重要性、消融分析等
 
-### ✅ 所有错误已修复（共9个）
+### ✅ 所有错误已修复（共10个）
 
 - 路径问题 ✅
 - 参数传递 ✅
 - Task注册 ✅
-- 设备匹配 ✅
+- 设备匹配(AS tensor) ✅
 - CUDA转换 ✅
 - BCELoss目标值范围 ✅
 - torch.sparse弃用警告 ✅
 - sklearn谱嵌入警告 ✅
 - 邻接矩阵类型错误 ✅
+- 设备匹配(C tensor) ✅
 
 ---
 
