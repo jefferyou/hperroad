@@ -280,6 +280,48 @@ else:
 
 ---
 
+### 12. 稀疏张量性能瓶颈 ✅
+**问题**: 训练卡在 "epoch 0, processed 0"，30分钟无进度
+
+**位置**: `hyperbolic_utils.py:293-296` in `HyperbolicGraphConv.forward()`
+
+**原因**: Fix #11引入的稀疏到稠密转换（adj.to_dense()）导致严重性能问题。5269x5269稀疏矩阵在每次forward pass都转换为稠密矩阵，计算成本极高。
+
+**修复**: 使用高效的稀疏张量操作，避免稠密化
+```python
+# 修复前（Fix #11引入的性能问题）
+if adj.is_sparse:
+    adj_dense = adj.to_dense()  # 非常慢！
+    deg = adj_dense.sum(dim=1, keepdim=True) + 1e-7
+    adj_norm = adj_dense / deg
+    agg = torch.matmul(adj_norm, x_tangent)
+
+# 修复后（高效稀疏操作）
+if adj.is_sparse:
+    # 使用稀疏操作计算度
+    adj_values = adj._values()
+    adj_indices = adj._indices()
+    N = adj.size(0)
+    deg = torch.zeros(N, 1, device=adj.device, dtype=adj_values.dtype)
+    deg.index_add_(0, adj_indices[0], adj_values.unsqueeze(1))
+    deg = deg + 1e-7
+
+    # 归一化边权重
+    adj_norm_values = adj_values / deg[adj_indices[0]].squeeze()
+    adj_norm = torch.sparse_coo_tensor(
+        adj_indices, adj_norm_values, adj.size(),
+        dtype=adj.dtype, device=adj.device
+    )
+
+    # 稀疏-稠密矩阵乘法
+    agg = torch.sparse.mm(adj_norm, x_tangent)
+```
+
+**影响文件**:
+- `VecCity-main/veccity/upstream/road_representation/hyperbolic_utils.py`
+
+---
+
 ## 提交历史
 
 1. **cc274ef**: Fix device mismatch in HRNR dataset
@@ -314,7 +356,7 @@ else:
 4. **超参数优化**: Random/Grid/Bayesian搜索
 5. **可视化工具**: 训练曲线、参数重要性、消融分析等
 
-### ✅ 所有错误已修复（共11个）
+### ✅ 所有错误已修复（共12个）
 
 - 路径问题 ✅
 - 参数传递 ✅
@@ -327,6 +369,7 @@ else:
 - 邻接矩阵类型错误 ✅
 - 设备匹配(C tensor) ✅
 - 稀疏张量操作错误 ✅
+- 稀疏张量性能瓶颈 ✅
 
 ---
 
