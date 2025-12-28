@@ -252,6 +252,34 @@ C = C + torch.tensor(trans_matrix, dtype=torch.float, device=self.device)
 
 ---
 
+### 11. 稀疏张量操作错误 ✅
+**错误**: `RuntimeError: add(sparse, dense) is not supported. Use add(dense, sparse) instead.`
+
+**位置**: `hyperbolic_utils.py:292` in `HyperbolicGraphConv.forward()`
+
+**原因**: 稀疏邻接矩阵的sum操作返回稠密张量，然后尝试进行稀疏/稠密混合操作
+
+**修复**:
+```python
+# 修复前
+deg = adj.sum(dim=1, keepdim=True) + 1e-7
+adj_norm = adj / deg
+
+# 修复后
+if adj.is_sparse:
+    adj_dense = adj.to_dense()
+    deg = adj_dense.sum(dim=1, keepdim=True) + 1e-7
+    adj_norm = adj_dense / deg
+else:
+    deg = adj.sum(dim=1, keepdim=True) + 1e-7
+    adj_norm = adj / deg
+```
+
+**影响文件**:
+- `VecCity-main/veccity/upstream/road_representation/hyperbolic_utils.py`
+
+---
+
 ## 提交历史
 
 1. **cc274ef**: Fix device mismatch in HRNR dataset
@@ -267,6 +295,8 @@ C = C + torch.tensor(trans_matrix, dtype=torch.float, device=self.device)
 11. **4f92ea9**: Fix adjacency matrix type error in spectral clustering
 12. **9cc813b**: Add fix #9 to summary - adjacency matrix type error
 13. **75fe391**: Fix device mismatch in calc_trz - C tensor
+14. **5de39cc**: Add fix #10 to summary - C tensor device mismatch
+15. **42bf52b**: Fix sparse tensor operation in HyperbolicGraphConv
 
 ---
 
@@ -284,7 +314,7 @@ C = C + torch.tensor(trans_matrix, dtype=torch.float, device=self.device)
 4. **超参数优化**: Random/Grid/Bayesian搜索
 5. **可视化工具**: 训练曲线、参数重要性、消融分析等
 
-### ✅ 所有错误已修复（共10个）
+### ✅ 所有错误已修复（共11个）
 
 - 路径问题 ✅
 - 参数传递 ✅
@@ -296,6 +326,7 @@ C = C + torch.tensor(trans_matrix, dtype=torch.float, device=self.device)
 - sklearn谱嵌入警告 ✅
 - 邻接矩阵类型错误 ✅
 - 设备匹配(C tensor) ✅
+- 稀疏张量操作错误 ✅
 
 ---
 
