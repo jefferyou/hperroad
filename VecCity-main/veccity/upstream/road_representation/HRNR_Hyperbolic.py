@@ -3,6 +3,7 @@ HRNR with Hyperbolic Embeddings
 基于HyCoCLIP思路改进的HRNR模型，使用Lorentz双曲空间
 """
 
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -276,6 +277,8 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                         max_auc = auc
                         # 保存segment层的双曲嵌入
                         node_embedding = self.graph_enc.segment_hyp_emb.data.cpu().numpy()
+                        # 确保evaluate_cache目录存在
+                        os.makedirs(os.path.dirname(self.road_embedding_path), exist_ok=True)
                         np.save(self.road_embedding_path, node_embedding)
 
                     if f1 > max_f1:

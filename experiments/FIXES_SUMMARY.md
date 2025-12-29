@@ -457,6 +457,41 @@ logits = torch.cat([pos_sim, neg_sim], dim=0)  # ✅ [11]
 
 ---
 
+### 16. 缺失evaluate_cache目录导致嵌入保存失败 ✅
+**错误**: `FileNotFoundError: [Errno 2] No such file or directory: './veccity/cache/hrnr_hyp_xa_s0_20251229_090319/evaluate_cache/road_embedding_HRNR_Hyperbolic_xa_128.npy'`
+
+**位置**: 评估阶段，`hhgcl_evaluator.py:357` 尝试加载嵌入文件时
+
+**原因**:
+- 训练循环在 `auc > max_auc` 时保存嵌入到 `evaluate_cache` 目录
+- 但该目录不存在，`np.save()` 调用失败（可能静默失败）
+- 评估器尝试加载不存在的文件导致错误
+
+**修复**:
+1. 添加 `os` 模块导入
+2. 在保存嵌入之前创建目录
+
+```python
+# 修复前
+if auc > max_auc:
+    max_auc = auc
+    node_embedding = self.graph_enc.segment_hyp_emb.data.cpu().numpy()
+    np.save(self.road_embedding_path, node_embedding)
+
+# 修复后
+if auc > max_auc:
+    max_auc = auc
+    node_embedding = self.graph_enc.segment_hyp_emb.data.cpu().numpy()
+    # 确保evaluate_cache目录存在
+    os.makedirs(os.path.dirname(self.road_embedding_path), exist_ok=True)
+    np.save(self.road_embedding_path, node_embedding)
+```
+
+**影响文件**:
+- `VecCity-main/veccity/upstream/road_representation/HRNR_Hyperbolic.py` (lines 6, 281-282)
+
+---
+
 ## 提交历史
 
 1. **cc274ef**: Fix device mismatch in HRNR dataset
@@ -491,7 +526,7 @@ logits = torch.cat([pos_sim, neg_sim], dim=0)  # ✅ [11]
 4. **超参数优化**: Random/Grid/Bayesian搜索
 5. **可视化工具**: 训练曲线、参数重要性、消融分析等
 
-### ✅ 所有错误已修复（共15个）
+### ✅ 所有错误已修复（共16个）
 
 - 路径问题 ✅
 - 参数传递 ✅
@@ -508,6 +543,7 @@ logits = torch.cat([pos_sim, neg_sim], dim=0)  # ✅ [11]
 - 双曲聚合性能瓶颈 ✅
 - 训练循环设备不匹配 ✅
 - 对比损失张量形状不匹配 ✅
+- 缺失evaluate_cache目录 ✅
 
 ---
 
