@@ -278,8 +278,18 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                         # 保存segment层的双曲嵌入
                         node_embedding = self.graph_enc.segment_hyp_emb.data.cpu().numpy()
                         # 确保evaluate_cache目录存在
-                        os.makedirs(os.path.dirname(self.road_embedding_path), exist_ok=True)
+                        embedding_dir = os.path.dirname(self.road_embedding_path)
+                        self._logger.info(f"Creating directory: {embedding_dir}")
+                        os.makedirs(embedding_dir, exist_ok=True)
+                        self._logger.info(f"Saving embeddings to: {self.road_embedding_path}")
+                        self._logger.info(f"Embedding shape: {node_embedding.shape}")
                         np.save(self.road_embedding_path, node_embedding)
+                        self._logger.info(f"Embeddings saved successfully")
+                        # Verify file was created
+                        if os.path.exists(self.road_embedding_path):
+                            self._logger.info(f"Verified: File exists at {self.road_embedding_path}")
+                        else:
+                            self._logger.error(f"ERROR: File was not created at {self.road_embedding_path}")
 
                     if f1 > max_f1:
                         max_f1 = f1
