@@ -266,30 +266,41 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                 model_optimizer.step()
 
                 if count % 20 == 0:
+                    self._logger.info(f"=== DEBUG: Starting evaluation at count={count} ===")
                     eval_data = get_next(eval_dataloader_iter)
                     if eval_data is None:
                         eval_dataloader_iter = iter(eval_dataloader)
                         eval_data = get_next(eval_dataloader_iter)
                     test_set, test_label = eval_data
+                    self._logger.info(f"=== DEBUG: Calling test_label_pred ===")
                     precision, recall, f1, auc = self.test_label_pred(test_set, test_label, self.device)
+                    self._logger.info(f"=== DEBUG: Got auc={auc}, max_auc={max_auc} ===")
 
                     if auc > max_auc:
+                        self._logger.info(f"=== DEBUG: Entering save block (auc {auc} > max_auc {max_auc}) ===")
                         max_auc = auc
                         # 保存segment层的双曲嵌入
-                        node_embedding = self.graph_enc.segment_hyp_emb.data.cpu().numpy()
-                        # 确保evaluate_cache目录存在
-                        embedding_dir = os.path.dirname(self.road_embedding_path)
-                        self._logger.info(f"Creating directory: {embedding_dir}")
-                        os.makedirs(embedding_dir, exist_ok=True)
-                        self._logger.info(f"Saving embeddings to: {self.road_embedding_path}")
-                        self._logger.info(f"Embedding shape: {node_embedding.shape}")
-                        np.save(self.road_embedding_path, node_embedding)
-                        self._logger.info(f"Embeddings saved successfully")
-                        # Verify file was created
-                        if os.path.exists(self.road_embedding_path):
-                            self._logger.info(f"Verified: File exists at {self.road_embedding_path}")
-                        else:
-                            self._logger.error(f"ERROR: File was not created at {self.road_embedding_path}")
+                        try:
+                            self._logger.info(f"=== DEBUG: Accessing segment_hyp_emb ===")
+                            self._logger.info(f"=== DEBUG: segment_hyp_emb type: {type(self.graph_enc.segment_hyp_emb)} ===")
+                            node_embedding = self.graph_enc.segment_hyp_emb.data.cpu().numpy()
+                            # 确保evaluate_cache目录存在
+                            embedding_dir = os.path.dirname(self.road_embedding_path)
+                            self._logger.info(f"=== DEBUG: Creating directory: {embedding_dir} ===")
+                            os.makedirs(embedding_dir, exist_ok=True)
+                            self._logger.info(f"=== DEBUG: Saving embeddings to: {self.road_embedding_path} ===")
+                            self._logger.info(f"=== DEBUG: Embedding shape: {node_embedding.shape} ===")
+                            np.save(self.road_embedding_path, node_embedding)
+                            self._logger.info(f"=== DEBUG: Embeddings saved successfully ===")
+                            # Verify file was created
+                            if os.path.exists(self.road_embedding_path):
+                                self._logger.info(f"Verified: File exists at {self.road_embedding_path}")
+                            else:
+                                self._logger.error(f"ERROR: File was not created at {self.road_embedding_path}")
+                        except Exception as e:
+                            self._logger.error(f"=== DEBUG: EXCEPTION while saving embeddings: {e} ===")
+                            import traceback
+                            self._logger.error(f"=== DEBUG: Traceback: {traceback.format_exc()} ===")
 
                     if f1 > max_f1:
                         max_f1 = f1
