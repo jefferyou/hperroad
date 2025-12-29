@@ -377,7 +377,7 @@ class HHGCLEvaluator(AbstractEvaluator):
                     result = downstream_model.run(emb_vec, label)
                 if task in ["tte"]:
                     label = self.data_label[task]
-                    result = downstream_model.run(emb, label, model, **kwargs)
+                    result = downstream_model.run(emb, label, **kwargs)
                 elif task in ['sts']:
                     result = downstream_model.run(emb,**kwargs)
                 self.result.update(add_prefix_to_keys(result, task + '_'))
