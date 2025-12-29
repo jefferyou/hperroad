@@ -58,8 +58,9 @@
     "label_epoch": 20,
 
     "baseline_gat_layer": 1,
-    "evaluate_tasks":[ "sts","tte","tsi"],
-    "evaluate_models":["SimilaritySearchModel","TravelTimeEstimationModel","SpeedInferenceModel"],
+    "evaluate_tasks":["tsi","tte"],
+    "evaluate_models":["SpeedInferenceModel","TravelTimeEstimationModel"],
+    "task_epoch": 20,
 
     "_comment": "=== Hyperbolic-specific parameters ===",
     "hyperbolic_dim": 224,
