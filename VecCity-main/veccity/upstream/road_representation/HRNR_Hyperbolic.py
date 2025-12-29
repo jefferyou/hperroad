@@ -364,7 +364,7 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         precision = float(right_pos) / precision_sum
         if recall == 0 or precision == 0:
             self._logger.info("p/r/f:0/0/0")
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, auc  # Return actual AUC even if precision/recall is 0
         f1 = 2 * recall * precision / (precision + recall)
         self._logger.info("label prediction @acc @p/r/f: " + str(float(right) / sum_num) + " " + str(precision) +
                           " " + str(recall) + " " + str(f1))
