@@ -189,16 +189,16 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
             # 计算anchor与pos的相似度（负距离）
             pos_sim = -self.manifold.lorentz_distance(
                 segment_emb[anchor:anchor+1], segment_emb[pos:pos+1]
-            ) / self.temperature
+            ).flatten() / self.temperature
 
             # 随机采样负样本
-            neg_samples = torch.randint(0, segment_emb.shape[0], (10,))
+            neg_samples = torch.randint(0, segment_emb.shape[0], (10,), device=self.device)
             neg_sim = -self.manifold.lorentz_distance(
                 segment_emb[anchor:anchor+1], segment_emb[neg_samples]
-            ) / self.temperature
+            ).flatten() / self.temperature
 
             # InfoNCE loss
-            logits = torch.cat([pos_sim, neg_sim])
+            logits = torch.cat([pos_sim, neg_sim], dim=0)
             labels = torch.zeros(1, dtype=torch.long, device=self.device)
             loss += F.cross_entropy(logits.unsqueeze(0), labels)
 
@@ -214,15 +214,15 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                 pos_seg = segments_idx[torch.randint(0, len(segments_idx), (1,))].item()
                 pos_sim = -self.manifold.lorentz_distance(
                     locality_emb[loc_idx:loc_idx+1], segment_emb[pos_seg:pos_seg+1]
-                ) / self.temperature
+                ).flatten() / self.temperature
 
                 # 随机采样负样本
-                neg_samples = torch.randint(0, segment_emb.shape[0], (10,))
+                neg_samples = torch.randint(0, segment_emb.shape[0], (10,), device=self.device)
                 neg_sim = -self.manifold.lorentz_distance(
                     locality_emb[loc_idx:loc_idx+1], segment_emb[neg_samples]
-                ) / self.temperature
+                ).flatten() / self.temperature
 
-                logits = torch.cat([pos_sim, neg_sim])
+                logits = torch.cat([pos_sim, neg_sim], dim=0)
                 labels = torch.zeros(1, dtype=torch.long, device=self.device)
                 loss += F.cross_entropy(logits.unsqueeze(0), labels)
 

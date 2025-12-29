@@ -413,6 +413,50 @@ test_set = test_set.clone().detach().to(device)
 
 ---
 
+### 15. 对比损失中的张量形状不匹配 ✅
+**错误**: `RuntimeError: Sizes of tensors must match except in dimension 0. Expected size 1 but got size 10 for tensor number 1 in the list.`
+
+**位置**: `HRNR_Hyperbolic.py:201` in `compute_contrastive_loss()`
+
+**原因**: `lorentz_distance` 在不同输入形状下返回不同维度的张量：
+- `pos_sim`: 两个 [1, d] 张量的距离，返回 [1] 或标量
+- `neg_sim`: [1, d] 与 [10, d] 张量的距离，返回 [10] 或 [1, 10]
+- `torch.cat([pos_sim, neg_sim])` 因维度不匹配而失败
+
+**修复**: 使用 `.flatten()` 确保两个张量都是1D，然后在dim=0上连接
+```python
+# 修复前 (Segment层对比)
+pos_sim = -self.manifold.lorentz_distance(
+    segment_emb[anchor:anchor+1], segment_emb[pos:pos+1]
+) / self.temperature
+
+neg_samples = torch.randint(0, segment_emb.shape[0], (10,))
+neg_sim = -self.manifold.lorentz_distance(
+    segment_emb[anchor:anchor+1], segment_emb[neg_samples]
+) / self.temperature
+
+logits = torch.cat([pos_sim, neg_sim])  # ❌ 形状不匹配
+
+# 修复后
+pos_sim = -self.manifold.lorentz_distance(
+    segment_emb[anchor:anchor+1], segment_emb[pos:pos+1]
+).flatten() / self.temperature
+
+neg_samples = torch.randint(0, segment_emb.shape[0], (10,), device=self.device)
+neg_sim = -self.manifold.lorentz_distance(
+    segment_emb[anchor:anchor+1], segment_emb[neg_samples]
+).flatten() / self.temperature
+
+logits = torch.cat([pos_sim, neg_sim], dim=0)  # ✅ [11]
+```
+
+同样的修复应用于跨层对比损失（lines 215-227）。
+
+**影响文件**:
+- `VecCity-main/veccity/upstream/road_representation/HRNR_Hyperbolic.py` (lines 190-203, 215-227)
+
+---
+
 ## 提交历史
 
 1. **cc274ef**: Fix device mismatch in HRNR dataset
@@ -447,7 +491,7 @@ test_set = test_set.clone().detach().to(device)
 4. **超参数优化**: Random/Grid/Bayesian搜索
 5. **可视化工具**: 训练曲线、参数重要性、消融分析等
 
-### ✅ 所有错误已修复（共14个）
+### ✅ 所有错误已修复（共15个）
 
 - 路径问题 ✅
 - 参数传递 ✅
@@ -463,6 +507,7 @@ test_set = test_set.clone().detach().to(device)
 - 稀疏张量性能瓶颈 ✅
 - 双曲聚合性能瓶颈 ✅
 - 训练循环设备不匹配 ✅
+- 对比损失张量形状不匹配 ✅
 
 ---
 
