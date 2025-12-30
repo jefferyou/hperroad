@@ -46,7 +46,7 @@ class SpeedInferenceModel(AbstractModel):
             X_train, X_test = x[train_index], x[test_index]
             y_train, y_test = y[train_index], y[test_index]
 
-            reg = linear_model.Ridge(alpha=self.alpha)
+            reg = linear_model.Ridge(alpha=self.alpha, solver='lsqr')
             X_train = np.array(X_train, dtype=float)
             y_train = np.array(y_train, dtype=float)
             reg.fit(X_train, y_train)
