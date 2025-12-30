@@ -58,8 +58,8 @@
     "label_epoch": 20,
 
     "baseline_gat_layer": 1,
-    "evaluate_tasks":["tsi","tte"],
-    "evaluate_models":["SpeedInferenceModel","TravelTimeEstimationModel"],
+    "evaluate_tasks":["tsi"],
+    "evaluate_models":["SpeedInferenceModel"],
     "task_epoch": 20,
 
     "_comment": "=== Hyperbolic-specific parameters ===",
