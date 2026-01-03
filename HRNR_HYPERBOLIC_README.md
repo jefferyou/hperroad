@@ -269,9 +269,24 @@ result = exp_map(ref, avg_tangent)
 | **表示空间** | 欧氏空间 | Lorentz双曲空间 |
 | **层次建模** | 谱聚类 + 可学习分配 | 双曲几何 + 蕴含锥 |
 | **消息传递** | 欧氏GCN/GAT | 双曲图卷积 |
-| **损失函数** | 交叉熵 | 交叉熵 + 蕴含 + 对比 |
+| **损失函数** | 仅交叉熵 | 交叉熵 + 蕴含 + 对比 |
 | **几何结构** | 平坦空间 | 负曲率空间 |
 | **层次关系** | 隐式学习 | 显式约束（蕴含锥） |
+| **编码器层数** | 3层定义，2层使用 | 3层定义，2层使用 |
+
+### 新增损失函数详解
+
+#### 蕴含损失 (L_CE)
+- **来源**: 借鉴HyCoCLIP的组合蕴含学习
+- **作用**: 显式建模层次关系（Region→Locality→Segment）
+- **创新点**: 原HRNR**没有**此损失，这是新增的双曲空间特有约束
+
+#### 对比损失 (L_CC)
+- **来源**: 借鉴HyCoCLIP的层次对比学习
+- **作用**: 通过对比学习增强表示质量
+- **创新点**: 原HRNR**没有**此损失，这是新增的改进
+
+**注意**: 原HRNR只使用交叉熵损失训练。HRNR_Hyperbolic通过引入蕴含损失和对比损失，更好地利用双曲空间的几何特性。
 
 ## 引用
 
@@ -280,6 +295,17 @@ result = exp_map(ref, avg_tangent)
 1. **HyCoCLIP**: Hyperbolic Compositional Learning (蕴含锥、对比学习)
 2. **HRNR**: Hierarchical Road Network Representation
 3. **Lorentz Model**: 双曲空间表示学习
+
+## 架构说明
+
+### 编码器层数
+- **定义**: 3层 (`tl_layer_1`, `tl_layer_2`, `tl_layer_3`)
+- **实际使用**: 2层（与原HRNR保持一致）
+- **说明**: 原HRNR代码中定义了3层编码器，但forward函数中只使用了前2层。HRNR_Hyperbolic为了完全复现原HRNR的行为，也采用了相同的设置。
+- **可选**: 如需使用第3层，可在forward函数中添加：
+  ```python
+  hyp_feat = self.tl_layer_3(self.struct_adj, hyp_feat, adj)
+  ```
 
 ## 注意事项
 

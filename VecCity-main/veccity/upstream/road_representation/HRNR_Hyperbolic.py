@@ -400,11 +400,14 @@ class HyperbolicGraphEncoderTL(Module):
             euclidean_dim, hyperbolic_dim, manifold
         ).to(self.device)
 
-        # 三层双曲图编码器
+        # 三层双曲图编码器（与原HRNR保持一致，虽然原HRNR只使用了前2层）
         self.tl_layer_1 = HyperbolicGraphEncoderTLCore(
             hparams, self.struct_assign, self.fnc_assign, self.device, self.manifold, hyperbolic_dim
         )
         self.tl_layer_2 = HyperbolicGraphEncoderTLCore(
+            hparams, self.struct_assign, self.fnc_assign, self.device, self.manifold, hyperbolic_dim
+        )
+        self.tl_layer_3 = HyperbolicGraphEncoderTLCore(
             hparams, self.struct_assign, self.fnc_assign, self.device, self.manifold, hyperbolic_dim
         )
 
