@@ -1,0 +1,9 @@
+{
+    "representation_object": "road",
+    "dataset_class": "HRNRDataset",
+    "geo_file": "xa.geo",
+    "rel_file": "xa.rel",
+    "usr_file": "xa.usr",
+    "dyna_file": "xa.dyna",
+    "_comment": "HRNR_Hyperbolic uses the same dataset as HRNR with additional hyperbolic space features"
+}

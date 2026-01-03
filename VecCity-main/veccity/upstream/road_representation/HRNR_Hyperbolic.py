@@ -3,6 +3,7 @@ HRNR with Hyperbolic Embeddings
 基于HyCoCLIP思路改进的HRNR模型，使用Lorentz双曲空间
 """
 
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -189,16 +190,16 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
             # 计算anchor与pos的相似度（负距离）
             pos_sim = -self.manifold.lorentz_distance(
                 segment_emb[anchor:anchor+1], segment_emb[pos:pos+1]
-            ) / self.temperature
+            ).flatten() / self.temperature
 
             # 随机采样负样本
-            neg_samples = torch.randint(0, segment_emb.shape[0], (10,))
+            neg_samples = torch.randint(0, segment_emb.shape[0], (10,), device=self.device)
             neg_sim = -self.manifold.lorentz_distance(
                 segment_emb[anchor:anchor+1], segment_emb[neg_samples]
-            ) / self.temperature
+            ).flatten() / self.temperature
 
             # InfoNCE loss
-            logits = torch.cat([pos_sim, neg_sim])
+            logits = torch.cat([pos_sim, neg_sim], dim=0)
             labels = torch.zeros(1, dtype=torch.long, device=self.device)
             loss += F.cross_entropy(logits.unsqueeze(0), labels)
 
@@ -214,15 +215,15 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                 pos_seg = segments_idx[torch.randint(0, len(segments_idx), (1,))].item()
                 pos_sim = -self.manifold.lorentz_distance(
                     locality_emb[loc_idx:loc_idx+1], segment_emb[pos_seg:pos_seg+1]
-                ) / self.temperature
+                ).flatten() / self.temperature
 
                 # 随机采样负样本
-                neg_samples = torch.randint(0, segment_emb.shape[0], (10,))
+                neg_samples = torch.randint(0, segment_emb.shape[0], (10,), device=self.device)
                 neg_sim = -self.manifold.lorentz_distance(
                     locality_emb[loc_idx:loc_idx+1], segment_emb[neg_samples]
-                ) / self.temperature
+                ).flatten() / self.temperature
 
-                logits = torch.cat([pos_sim, neg_sim])
+                logits = torch.cat([pos_sim, neg_sim], dim=0)
                 labels = torch.zeros(1, dtype=torch.long, device=self.device)
                 loss += F.cross_entropy(logits.unsqueeze(0), labels)
 
@@ -244,8 +245,8 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
             self._logger.info("epoch " + str(i) + ", processed " + str(count))
             for step, (train_set, train_label) in enumerate(train_dataloader):
                 model_optimizer.zero_grad()
-                train_set = train_set.clone().detach()
-                train_label = train_label.clone().detach()
+                train_set = train_set.clone().detach().to(self.device)
+                train_label = train_label.clone().detach().to(self.device)
 
                 # 分类损失
                 pred = self.encode(train_set)
@@ -265,18 +266,41 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                 model_optimizer.step()
 
                 if count % 20 == 0:
+                    self._logger.info(f"=== DEBUG: Starting evaluation at count={count} ===")
                     eval_data = get_next(eval_dataloader_iter)
                     if eval_data is None:
                         eval_dataloader_iter = iter(eval_dataloader)
                         eval_data = get_next(eval_dataloader_iter)
                     test_set, test_label = eval_data
+                    self._logger.info(f"=== DEBUG: Calling test_label_pred ===")
                     precision, recall, f1, auc = self.test_label_pred(test_set, test_label, self.device)
+                    self._logger.info(f"=== DEBUG: Got auc={auc}, max_auc={max_auc} ===")
 
                     if auc > max_auc:
+                        self._logger.info(f"=== DEBUG: Entering save block (auc {auc} > max_auc {max_auc}) ===")
                         max_auc = auc
                         # 保存segment层的双曲嵌入
-                        node_embedding = self.graph_enc.segment_hyp_emb.data.cpu().numpy()
-                        np.save(self.road_embedding_path, node_embedding)
+                        try:
+                            self._logger.info(f"=== DEBUG: Accessing segment_hyp_emb ===")
+                            self._logger.info(f"=== DEBUG: segment_hyp_emb type: {type(self.graph_enc.segment_hyp_emb)} ===")
+                            node_embedding = self.graph_enc.segment_hyp_emb.data.cpu().numpy()
+                            # 确保evaluate_cache目录存在
+                            embedding_dir = os.path.dirname(self.road_embedding_path)
+                            self._logger.info(f"=== DEBUG: Creating directory: {embedding_dir} ===")
+                            os.makedirs(embedding_dir, exist_ok=True)
+                            self._logger.info(f"=== DEBUG: Saving embeddings to: {self.road_embedding_path} ===")
+                            self._logger.info(f"=== DEBUG: Embedding shape: {node_embedding.shape} ===")
+                            np.save(self.road_embedding_path, node_embedding)
+                            self._logger.info(f"=== DEBUG: Embeddings saved successfully ===")
+                            # Verify file was created
+                            if os.path.exists(self.road_embedding_path):
+                                self._logger.info(f"Verified: File exists at {self.road_embedding_path}")
+                            else:
+                                self._logger.error(f"ERROR: File was not created at {self.road_embedding_path}")
+                        except Exception as e:
+                            self._logger.error(f"=== DEBUG: EXCEPTION while saving embeddings: {e} ===")
+                            import traceback
+                            self._logger.error(f"=== DEBUG: Traceback: {traceback.format_exc()} ===")
 
                     if f1 > max_f1:
                         max_f1 = f1
@@ -305,7 +329,7 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         """评估函数"""
         right = 0
         sum_num = 0
-        test_set = test_set.clone().detach()
+        test_set = test_set.clone().detach().to(device)
         pred = self.encode(test_set)
         pred_prob = F.softmax(pred, -1)
         pred_scores = pred_prob[:, 1]
@@ -340,7 +364,7 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         precision = float(right_pos) / precision_sum
         if recall == 0 or precision == 0:
             self._logger.info("p/r/f:0/0/0")
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, auc  # Return actual AUC even if precision/recall is 0
         f1 = 2 * recall * precision / (precision + recall)
         self._logger.info("label prediction @acc @p/r/f: " + str(float(right) / sum_num) + " " + str(precision) +
                           " " + str(recall) + " " + str(f1))
@@ -420,7 +444,7 @@ class HyperbolicGraphEncoderTL(Module):
     def _aggregate_hyperbolic(self, embeddings, assignment_matrix):
         """
         在双曲空间中聚合嵌入
-        使用指数映射和对数映射实现
+        优化版本：使用批量矩阵操作替代循环
 
         Args:
             embeddings: [N, d+1] 双曲嵌入
@@ -428,40 +452,31 @@ class HyperbolicGraphEncoderTL(Module):
         Returns:
             aggregated: [M, d+1] 聚合后的双曲嵌入
         """
-        M = assignment_matrix.shape[0]
-        aggregated = []
+        # 归一化分配矩阵的每一行（确保每个聚类的权重和为1）
+        row_sums = assignment_matrix.sum(dim=1, keepdim=True) + 1e-7
+        normalized_assignment = assignment_matrix / row_sums  # [M, N]
 
-        for i in range(M):
-            # 找到属于第i个聚类的节点
-            mask = assignment_matrix[i] > 0
-            if mask.sum() == 0:
-                # 如果没有节点，使用原点
-                origin = torch.zeros(embeddings.shape[1], device=self.device)
-                origin[0] = 1.0
-                aggregated.append(origin)
-            else:
-                # 加权平均（在双曲空间中通过切空间实现）
-                cluster_embs = embeddings[mask]
-                weights = assignment_matrix[i][mask]
-                weights = weights / (weights.sum() + 1e-7)
+        # 方法1：简化版 - 在切空间中聚合
+        # 映射到切空间（使用原点作为参考点）
+        origin = torch.zeros_like(embeddings[0])
+        origin[0] = 1.0
 
-                # 使用第一个点作为参考点
-                ref_point = cluster_embs[0]
+        # 批量映射到切空间
+        tangent_embeddings = self.manifold.log_map(
+            origin.unsqueeze(0).expand(embeddings.shape[0], -1),
+            embeddings
+        )  # [N, d+1]
 
-                # 映射到切空间
-                tangent_vecs = []
-                for j in range(cluster_embs.shape[0]):
-                    tangent_vec = self.manifold.log_map(ref_point.unsqueeze(0), cluster_embs[j].unsqueeze(0))
-                    tangent_vecs.append(tangent_vec.squeeze(0) * weights[j])
+        # 使用矩阵乘法进行加权聚合
+        aggregated_tangent = torch.matmul(normalized_assignment, tangent_embeddings)  # [M, d+1]
 
-                # 在切空间中加权平均
-                avg_tangent = torch.stack(tangent_vecs).sum(dim=0)
+        # 批量映射回双曲空间
+        aggregated = self.manifold.exp_map(
+            origin.unsqueeze(0).expand(aggregated_tangent.shape[0], -1),
+            aggregated_tangent
+        )  # [M, d+1]
 
-                # 映射回双曲空间
-                agg_point = self.manifold.exp_map(ref_point.unsqueeze(0), avg_tangent.unsqueeze(0))
-                aggregated.append(agg_point.squeeze(0))
-
-        return torch.stack(aggregated)
+        return aggregated
 
 
 class HyperbolicGraphEncoderTLCore(Module):

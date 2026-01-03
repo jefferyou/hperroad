@@ -201,6 +201,10 @@ class GraphEncoderTL(Module):
 
 
 def get_sparse_adj(adj, device):
+    # Convert CUDA tensor to CPU before numpy conversion
+    if isinstance(adj, torch.Tensor):
+        adj = adj.cpu().detach().numpy()
+
     self_loop = np.eye(len(adj))
     adj = np.array(adj) + self_loop
     adj = sparse.coo_matrix(adj)
@@ -209,7 +213,8 @@ def get_sparse_adj(adj, device):
                                dtype=torch.long, device=device).t()
     adj_values = torch.tensor(adj.data, dtype=torch.float, device=device)
     adj_shape = adj.shape
-    adj = torch.sparse.FloatTensor(adj_indices, adj_values, adj_shape).to(device)
+    # Use torch.sparse_coo_tensor instead of deprecated torch.sparse.FloatTensor
+    adj = torch.sparse_coo_tensor(adj_indices, adj_values, adj_shape, dtype=torch.float, device=device)
     return adj.coalesce()
 
 

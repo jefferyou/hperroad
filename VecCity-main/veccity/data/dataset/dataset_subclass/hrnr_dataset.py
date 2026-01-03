@@ -2,6 +2,7 @@ import os
 import pickle
 import random
 import pdb
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -207,7 +208,10 @@ class HRNRDataset(AbstractDataset):
         self._logger.info("k1: " + str(self.k1) + ", k2: " + str(self.k2) + ", k3: " + str(self.k3))
 
         NS = torch.cat([lane_emb, type_emb, length_emb, node_emb], 1)
-        AS = torch.tensor(self.adj_matrix + np.array(np.eye(self.num_nodes)), dtype=torch.float)
+        # Create adjacency matrix with self-loops, ensuring values are in [0, 1] for BCELoss
+        AS = torch.tensor(self.adj_matrix, dtype=torch.float).to(self.device)
+        AS = AS + torch.eye(self.num_nodes, device=self.device)
+        AS = torch.clamp(AS, 0, 1)  # Ensure values are in [0, 1] range for BCELoss
 
         self.hidden_dims = self.config.get("hidden_dims")
         self.dropout = self.config.get("dropout")
@@ -228,10 +232,18 @@ class HRNRDataset(AbstractDataset):
         TSR = None
         self._logger.info("calculating TSR...")
 
+        # Convert adj_matrix to numpy array and symmetrize for spectral clustering
+        adj_np = np.array(self.adj_matrix)
+        adj_sym = (adj_np + adj_np.T) / 2
+
         # 谱聚类 求出M1
-        sc = SpectralClustering(self.k2, affinity="precomputed",
-                                n_init=1, assign_labels="discretize")
-        sc.fit(self.adj_matrix)
+        # Suppress sklearn warnings about graph connectivity and convergence
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=UserWarning)
+            sc = SpectralClustering(self.k2, affinity="precomputed",
+                                    n_init=1, assign_labels="discretize",
+                                    eigen_tol=1e-4)  # Relaxed tolerance for faster convergence
+            sc.fit(adj_sym)
         labels = sc.labels_
         M1 = [[0 for i in range(self.k2)] for j in range(self.k1)]
         for i in range(self.k1):
@@ -273,10 +285,11 @@ class HRNRDataset(AbstractDataset):
         loss2 = torch.nn.MSELoss()
         optimizer2 = optim.Adam(RZ_GCN.parameters(), lr=1e-3)  # TODO: lr
         optimizer2.zero_grad()
-        C = torch.tensor(Utils(self.num_nodes, self.adj_matrix).get_reachable_matrix(), dtype=torch.float)
+        C = torch.tensor(Utils(self.num_nodes, self.adj_matrix).get_reachable_matrix(),
+                        dtype=torch.float, device=self.device)
         # 将频次转移矩阵转化为频率转移矩阵
         trans_matrix = self.trans_matrix / (self.trans_matrix.sum(0) + 1e-10)
-        C = C + torch.tensor(trans_matrix, dtype = torch.float) # 引入轨迹转移矩阵
+        C = C + torch.tensor(trans_matrix, dtype=torch.float, device=self.device) # 引入轨迹转移矩阵
         self._logger.info("calculating TRZ...")
         for i in range(300):  # TODO: 迭代次数
             self._logger.info("epoch " + str(i))

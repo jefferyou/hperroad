@@ -289,11 +289,33 @@ class HyperbolicGraphConv(nn.Module):
 
         # 2. 在切空间中聚合邻居
         # 归一化邻接矩阵
-        deg = adj.sum(dim=1, keepdim=True) + 1e-7
-        adj_norm = adj / deg
+        # Handle sparse adjacency matrix efficiently
+        if adj.is_sparse:
+            # Use sparse operations to avoid expensive dense conversion
+            # Calculate degree by summing sparse matrix rows
+            adj_values = adj._values()
+            adj_indices = adj._indices()
 
-        # 聚合
-        agg = torch.matmul(adj_norm, x_tangent)  # [N, in_dim]
+            # Compute row-wise degree
+            N = adj.size(0)
+            deg = torch.zeros(N, 1, device=adj.device, dtype=adj_values.dtype)
+            deg.index_add_(0, adj_indices[0], adj_values.unsqueeze(1))
+            deg = deg + 1e-7
+
+            # Normalize edge weights: divide each edge by source node degree
+            adj_norm_values = adj_values / deg[adj_indices[0]].squeeze()
+            adj_norm = torch.sparse_coo_tensor(
+                adj_indices, adj_norm_values, adj.size(),
+                dtype=adj.dtype, device=adj.device
+            )
+
+            # Sparse-dense matrix multiplication
+            agg = torch.sparse.mm(adj_norm, x_tangent)  # [N, in_dim]
+        else:
+            # Dense adjacency matrix
+            deg = adj.sum(dim=1, keepdim=True) + 1e-7
+            adj_norm = adj / deg
+            agg = torch.matmul(adj_norm, x_tangent)  # [N, in_dim]
 
         # 3. 线性变换
         out_tangent = torch.matmul(agg, self.weight)  # [N, out_dim]
