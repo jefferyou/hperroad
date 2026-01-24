@@ -41,8 +41,11 @@ def run_evaluation_only(args):
     print(f"Task Epochs: {args.task_epoch}")
     print("=" * 80)
 
-    # 检查embedding文件是否存在
-    embedding_path = f'./veccity/cache/{args.exp_id}/evaluate_cache/road_embedding_HRNR_Hyperbolic_xa_128.npy'
+    # 检查embedding文件是否存在 - 使用绝对路径
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    veccity_path = os.path.join(project_root, 'VecCity-main')
+    embedding_path = os.path.join(veccity_path, 'veccity', 'cache', args.exp_id, 'evaluate_cache', 'road_embedding_HRNR_Hyperbolic_xa_128.npy')
     if not os.path.exists(embedding_path):
         print(f"ERROR: Embedding file not found at: {embedding_path}")
         print("Please run 'python run_training_only.py' first!")
