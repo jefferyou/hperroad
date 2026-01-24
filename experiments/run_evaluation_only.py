@@ -15,9 +15,8 @@ sys.path.insert(0, project_root)
 import argparse
 import torch
 import numpy as np
-from veccity.utils import get_logger, ensure_dir
+from veccity.utils import get_logger, ensure_dir, get_evaluator
 from veccity.config import ConfigParser
-from veccity.downstream import get_evaluator
 
 def parse_args():
     parser = argparse.ArgumentParser()
