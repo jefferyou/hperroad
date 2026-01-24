@@ -3,24 +3,29 @@ GPU性能优化补丁
 修复Windows上num_workers开销和batch_size过小的问题
 """
 import os
+import sys
 
-# 需要修改的文件列表
+# 获取正确的路径
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+
+# 需要修改的文件列表（使用绝对路径）
 files_to_patch = [
-    '../VecCity-main/veccity/downstream/downstream_models/travel_time_estimation.py',
-    '../VecCity-main/veccity/downstream/downstream_models/similarity_search_model.py',
+    os.path.join(project_root, 'VecCity-main/veccity/downstream/downstream_models/travel_time_estimation.py'),
+    os.path.join(project_root, 'VecCity-main/veccity/downstream/downstream_models/similarity_search_model.py'),
 ]
 
 def optimize_dataloader_config():
     """优化DataLoader配置以提升GPU利用率"""
 
-    for file_path in files_to_patch:
-        full_path = os.path.join(os.path.dirname(__file__), file_path)
-
+    for full_path in files_to_patch:
         if not os.path.exists(full_path):
-            print(f"Skipping {file_path} (not found)")
+            print(f"Skipping {full_path} (not found)")
             continue
 
-        print(f"Processing: {file_path}")
+        # 显示相对路径以便阅读
+        rel_path = os.path.relpath(full_path, project_root)
+        print(f"Processing: {rel_path}")
 
         with open(full_path, 'r', encoding='utf-8') as f:
             content = f.read()

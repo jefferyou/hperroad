@@ -4,7 +4,13 @@
 """
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# 添加正确的路径
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+veccity_path = os.path.join(project_root, 'VecCity-main')
+sys.path.insert(0, veccity_path)
+sys.path.insert(0, project_root)
 
 import argparse
 import torch
