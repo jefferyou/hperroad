@@ -15,7 +15,8 @@ sys.path.insert(0, project_root)
 import argparse
 import torch
 import numpy as np
-from veccity.utils import get_logger, ensure_dir, ConfigParser
+from veccity.utils import get_logger, ensure_dir
+from veccity.config import ConfigParser
 from veccity.downstream import get_evaluator
 
 def parse_args():
@@ -130,7 +131,8 @@ def run_evaluation_only(args):
             path = batch['seq'][:,:,0]
             return self.encode(path.view(-1)).view(path.shape[0], path.shape[1], -1)
 
-    dummy_model = DummyModel(output_dim=config['output_dim'])
+    # Use actual embedding dimension from loaded array
+    dummy_model = DummyModel(output_dim=emb.shape[1])
 
     # 运行评估
     logger.info("=" * 80)
