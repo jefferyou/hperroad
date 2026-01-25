@@ -1,5 +1,6 @@
 """
 独立的预训练脚本 - 只执行上游模型训练
+简化版本，直接使用run_model
 """
 import sys
 import os
@@ -8,19 +9,21 @@ import os
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(script_dir)
 veccity_path = os.path.join(project_root, 'VecCity-main')
+
+# 切换到VecCity根目录
+os.chdir(veccity_path)
+
 sys.path.insert(0, veccity_path)
 sys.path.insert(0, project_root)
 
-from veccity.pipeline import run_model
-from veccity.utils import get_executor, get_model, get_evaluator, get_logger, ensure_dir
 import argparse
-import torch
+from veccity.pipeline import run_model
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='xa', help='Dataset name')
+    parser.add_argument('--dataset', type=str, default='xa', help='Dataset name (xa/bj/cd/sf)')
     parser.add_argument('--seed', type=int, default=0, help='Random seed')
-    parser.add_argument('--max_epoch', type=int, default=10, help='Max training epochs')
+    parser.add_argument('--max_epoch', type=int, default=100, help='Max training epochs')
     parser.add_argument('--gpu', type=str, default='True', help='Use GPU')
     parser.add_argument('--gpu_id', type=int, default=0, help='GPU ID')
     return parser.parse_args()
@@ -35,77 +38,39 @@ def run_training_only(args):
     print(f"GPU: {args.gpu} (ID: {args.gpu_id})")
     print("=" * 80)
 
-    # 构建配置
-    from veccity.utils import general_arguments
-    from veccity.config import ConfigParser
-
     # 准备参数
     other_args = {
-        'task': 'segment',
-        'model': 'HRNR_Hyperbolic',
-        'dataset': args.dataset,
-        'saved_model': True,
-        'train': True,
+        'seed': args.seed,
+        'max_epoch': args.max_epoch,
+        'gpu': args.gpu == 'True',
+        'gpu_id': args.gpu_id,
+        'train': True,  # 开启训练
+        # 设置空的下游任务列表，跳过评估
+        'evaluate_tasks': [],
+        'evaluate_models': [],
     }
 
-    # 添加超参数
-    cmd_args = general_arguments()
-    for key, value in other_args.items():
-        setattr(cmd_args, key, value)
-
-    # 添加命令行参数
-    setattr(cmd_args, 'seed', args.seed)
-    setattr(cmd_args, 'max_epoch', args.max_epoch)
-    setattr(cmd_args, 'gpu', args.gpu == 'True')
-    setattr(cmd_args, 'gpu_id', args.gpu_id)
-
-    # 解析配置
-    config = ConfigParser(
-        task=cmd_args.task,
-        model=cmd_args.model,
-        dataset=cmd_args.dataset,
+    # 调用VecCity pipeline，只训练不评估
+    result = run_model(
+        task='segment',
+        model_name='HRNR_Hyperbolic',
+        dataset_name=args.dataset,
         config_file=None,
-        saved_model=cmd_args.saved_model,
-        train=cmd_args.train,
-        other_args=vars(cmd_args)
+        saved_model=True,
+        train=True,  # 训练模式
+        other_args=other_args
     )
 
-    # 获取logger
-    logger = get_logger(config)
-    logger.info('TRAINING ONLY MODE - Skipping downstream evaluation')
-    logger.info(config.config)
+    print("\n" + "=" * 80)
+    print("TRAINING COMPLETE!")
+    print("=" * 80)
+    print("Model and embeddings have been saved to:")
+    print(f"  ./veccity/cache/<exp_id>/model_cache/")
+    print(f"  ./veccity/cache/<exp_id>/evaluate_cache/")
+    print("\nNext step: Run 'run_evaluation_only.py' with the generated exp_id")
+    print("=" * 80)
 
-    # 加载数据
-    from veccity.data import get_dataset
-    dataset = get_dataset(config)
-    train_data, valid_data, test_data = dataset.get_data()
-    data_feature = dataset.get_data_feature()
-
-    # 创建模型
-    model = get_model(config, data_feature)
-
-    # 创建executor（用于训练）
-    executor = get_executor(config, model, data_feature)
-
-    # 只执行训练
-    logger.info("=" * 80)
-    logger.info("Starting UPSTREAM TRAINING...")
-    logger.info("=" * 80)
-    executor.train(train_data, valid_data)
-
-    # 保存模型
-    logger.info("=" * 80)
-    logger.info("Saving trained model and embeddings...")
-    logger.info("=" * 80)
-    executor.save_model(None)  # 使用默认路径保存
-
-    logger.info("=" * 80)
-    logger.info("TRAINING COMPLETE!")
-    logger.info(f"Model saved to: ./veccity/cache/{config['exp_id']}/model_cache/")
-    logger.info(f"Embeddings saved to: ./veccity/cache/{config['exp_id']}/evaluate_cache/")
-    logger.info("=" * 80)
-    logger.info("Next step: Run 'python run_evaluation_only.py' to evaluate")
-    logger.info("=" * 80)
+    return result
 
 if __name__ == '__main__':
     args = parse_args()
