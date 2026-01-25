@@ -52,6 +52,16 @@ else
     echo -e "${RED}✗${NC} Failed to enable pretraining multi-GPU"
     exit 1
 fi
+
+# 应用DataParallel修复
+echo -e "${YELLOW}[STEP 0.2]${NC} Fixing DataParallel compatibility..."
+python fix_dataparallel.py
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓${NC} DataParallel fix applied"
+else
+    echo -e "${RED}✗${NC} Failed to apply DataParallel fix"
+    exit 1
+fi
 echo ""
 
 # 创建结果目录

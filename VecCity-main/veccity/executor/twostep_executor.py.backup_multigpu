@@ -9,17 +9,6 @@ class TwoStepExecutor(AbstractExecutor):
         self.evaluator = get_evaluator(config,data_feature)
         self.config = config
         self.model = model
-
-        # === MULTI-GPU OPTIMIZATION ===
-        # 自动检测是否启用多GPU加速
-        if torch.cuda.is_available():
-            gpu_ids = config.get('train_gpu_ids', None)
-            if gpu_ids and len(gpu_ids) > 1:
-                print(f"[OPTIMIZATION] Enabling DataParallel with GPUs: {gpu_ids}")
-                self.model = torch.nn.DataParallel(self.model, device_ids=gpu_ids)
-                print(f"[OPTIMIZATION] Model wrapped with DataParallel")
-        # === END MULTI-GPU OPTIMIZATION ===
-
         self.exp_id = config.get('exp_id', None)
         self._logger = getLogger()
 
@@ -30,12 +19,6 @@ class TwoStepExecutor(AbstractExecutor):
         self.evaluate_res_dir = './veccity/cache/{}/evaluate_cache'.format(self.exp_id)
         ensure_dir(self.cache_dir)
         ensure_dir(self.evaluate_res_dir)
-
-    def _get_model(self):
-        """Helper to get the actual model (unwrap DataParallel if needed)"""
-        if isinstance(self.model, torch.nn.DataParallel):
-            return self.model.module
-        return self.model
 
     def evaluate(self, test_dataloader=None):
         """
@@ -49,27 +32,27 @@ class TwoStepExecutor(AbstractExecutor):
         """
         use data to train model with config
         """
-        return self._get_model().run(train_dataloader,eval_dataloader)
+        return self.model.run(train_dataloader,eval_dataloader)
 
 
     def load_model(self, cache_name):
         self._logger.info("Loaded model at " + cache_name)
         model_state  = torch.load(cache_name,map_location=torch.device("cpu"))
         try:
-            self._get_model().load_state_dict(model_state['model_state_dict'])
+            self.model.load_state_dict(model_state['model_state_dict'])
             if 'optimizer_state_dict' in model_state:
-                self._get_model().optimizer.load_state_dict(model_state['optimizer_state_dict'])
+                self.model.optimizer.load_state_dict(model_state['optimizer_state_dict'])
         except:
             pass
 
     def save_model(self, epoch):
         ensure_dir(self.cache_dir)
         config = dict()
-        config['model_state_dict'] = self._get_model().state_dict()
-        if self._get_model().optimizer != None:
-            config['optimizer_state_dict'] = self._get_model().optimizer.state_dict()
+        config['model_state_dict'] = self.model.state_dict()
+        if self.model.optimizer != None:
+            config['optimizer_state_dict'] = self.model.optimizer.state_dict() 
         config['epoch'] = epoch
-        model_path = self.cache_dir + '/' + self.config['model'] + '_' + self.config['dataset'] + '.m'
+        model_path = self.cache_dir + '/' + self.config['model'] + '_' + self.config['dataset'] + '.m' 
         torch.save(config, model_path)
         self._logger.info("Saved model at {}".format(epoch))
         return model_path
