@@ -25,7 +25,9 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=0, help='Random seed')
     parser.add_argument('--max_epoch', type=int, default=100, help='Max training epochs')
     parser.add_argument('--gpu', type=str, default='True', help='Use GPU')
-    parser.add_argument('--gpu_id', type=int, default=0, help='GPU ID')
+    parser.add_argument('--gpu_id', type=int, default=0, help='GPU ID (primary GPU)')
+    parser.add_argument('--train_gpu_ids', type=int, nargs='+', default=None,
+                        help='GPU IDs for multi-GPU training (e.g., 3 4 5 6 7)')
     return parser.parse_args()
 
 def run_training_only(args):
@@ -49,6 +51,12 @@ def run_training_only(args):
         'evaluate_tasks': [],
         'evaluate_models': [],
     }
+
+    # 多GPU训练支持
+    if args.train_gpu_ids and len(args.train_gpu_ids) > 1:
+        other_args['train_gpu_ids'] = args.train_gpu_ids
+        print(f"Multi-GPU Training Enabled: {args.train_gpu_ids}")
+        print(f"Expected Speedup: {len(args.train_gpu_ids) * 0.8:.1f}x")
 
     # 调用VecCity pipeline，只训练不评估
     result = run_model(

@@ -16,7 +16,7 @@ CITIES="xian beijing chengdu sanfrancisco"
 MAX_EPOCH=100           # 预训练轮数
 TASK_EPOCH_TTE=100      # TTE任务轮数（HRNR默认）
 TASK_EPOCH_STS=50       # STS任务轮数（HRNR默认）
-TRAIN_GPU=3             # 预训练使用的GPU
+TRAIN_GPUS="3,4,5,6,7"  # 预训练使用的GPU（多GPU并行）
 EVAL_GPUS="3,4,5,6,7"   # 评估使用的GPU（多GPU并行）
 SEED=0
 
@@ -33,13 +33,23 @@ echo -e "${BLUE}║                    Multi-City, Multi-GPU Accelerated        
 echo -e "${BLUE}╚═══════════════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# 步骤1: 应用性能优化补丁
+# 步骤0: 应用性能优化补丁
 echo -e "${YELLOW}[STEP 0]${NC} Applying Performance Optimizations..."
 python apply_downstream_optimizations.py
 if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✓${NC} Optimizations applied successfully"
+    echo -e "${GREEN}✓${NC} Downstream task optimizations applied"
 else
-    echo -e "${RED}✗${NC} Failed to apply optimizations"
+    echo -e "${RED}✗${NC} Failed to apply downstream optimizations"
+    exit 1
+fi
+
+# 应用预训练多GPU优化
+echo -e "${YELLOW}[STEP 0.1]${NC} Enabling Multi-GPU for Pretraining..."
+python enable_pretraining_multigpu.py
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓${NC} Pretraining multi-GPU enabled"
+else
+    echo -e "${RED}✗${NC} Failed to enable pretraining multi-GPU"
     exit 1
 fi
 echo ""
@@ -73,21 +83,25 @@ for CITY in $CITIES; do
     START_TIME=$(date +%s)
 
     # ========================================================================
-    # 步骤1: 预训练（Upstream Training）
+    # 步骤1: 预训练（Upstream Training with Multi-GPU）
     # ========================================================================
     echo ""
-    echo -e "${YELLOW}[STEP 1/${CITY^^}]${NC} Upstream Training (Pretraining)"
+    echo -e "${YELLOW}[STEP 1/${CITY^^}]${NC} Upstream Training (Pretraining with Multi-GPU)"
     echo -e "  Dataset: $DATASET"
     echo -e "  Epochs: $MAX_EPOCH"
-    echo -e "  GPU: $TRAIN_GPU"
+    echo -e "  GPUs: $TRAIN_GPUS (DataParallel)"
     echo ""
 
-    CUDA_VISIBLE_DEVICES=$TRAIN_GPU python run_training_only.py \
+    # 转换GPU列表为数组格式
+    IFS=',' read -ra GPU_ARRAY <<< "$TRAIN_GPUS"
+
+    CUDA_VISIBLE_DEVICES=$TRAIN_GPUS python run_training_only.py \
         --dataset $DATASET \
         --seed $SEED \
         --max_epoch $MAX_EPOCH \
         --gpu True \
-        --gpu_id 0  # 因为CUDA_VISIBLE_DEVICES只暴露了1个GPU，所以用ID 0
+        --gpu_id 0 \
+        --train_gpu_ids ${GPU_ARRAY[@]}  # 多GPU训练
 
     if [ $? -ne 0 ]; then
         echo -e "${RED}✗${NC} Training failed for $CITY"
