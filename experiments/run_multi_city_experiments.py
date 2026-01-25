@@ -63,8 +63,6 @@ class MultiCityExperimentRunner:
         cmd = [
             'python', 'run_training_only.py',
             '--dataset', dataset_code,
-            '--model', 'HRNR_Hyperbolic',
-            '--task', 'segment',
             '--seed', str(seed),
             '--max_epoch', str(self.args.max_epoch),
             '--gpu', 'True',
