@@ -94,6 +94,10 @@ for CITY in $CITIES; do
 
     # 转换GPU列表为数组格式
     IFS=',' read -ra GPU_ARRAY <<< "$TRAIN_GPUS"
+    NUM_GPUS=${#GPU_ARRAY[@]}
+
+    # 创建逻辑GPU ID列表（CUDA_VISIBLE_DEVICES会重新映射为0,1,2...）
+    LOGICAL_GPU_IDS=$(seq -s ' ' 0 $((NUM_GPUS-1)))
 
     CUDA_VISIBLE_DEVICES=$TRAIN_GPUS python run_training_only.py \
         --dataset $DATASET \
@@ -101,7 +105,7 @@ for CITY in $CITIES; do
         --max_epoch $MAX_EPOCH \
         --gpu True \
         --gpu_id 0 \
-        --train_gpu_ids ${GPU_ARRAY[@]}  # 多GPU训练
+        --train_gpu_ids $LOGICAL_GPU_IDS  # 逻辑GPU IDs: 0,1,2,3,4
 
     if [ $? -ne 0 ]; then
         echo -e "${RED}✗${NC} Training failed for $CITY"
@@ -134,6 +138,7 @@ for CITY in $CITIES; do
 
     # 运行所有下游任务
     # 注意：这里手动运行每个任务以使用不同的epoch设置
+    # CUDA_VISIBLE_DEVICES会将物理GPU重新映射为逻辑GPU 0,1,2...，所以gpu_id始终为0
 
     # TSI (Speed Inference) - Ridge regression, 无训练epoch
     echo -e "${BLUE}[2.1] Running TSI...${NC}"
@@ -144,6 +149,12 @@ for CITY in $CITIES; do
         --dataset $DATASET \
         2>&1 | tee "$BENCHMARK_DIR/${CITY}_tsi.log"
 
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}✗${NC} TSI failed for $CITY"
+    else
+        echo -e "${GREEN}✓${NC} TSI completed"
+    fi
+
     # TTE (Travel Time Estimation) - LSTM, HRNR默认100 epochs
     echo -e "${BLUE}[2.2] Running TTE (${TASK_EPOCH_TTE} epochs)...${NC}"
     CUDA_VISIBLE_DEVICES=$EVAL_GPUS python run_evaluation_only.py \
@@ -153,6 +164,12 @@ for CITY in $CITIES; do
         --gpu_id 0 \
         --dataset $DATASET \
         2>&1 | tee "$BENCHMARK_DIR/${CITY}_tte.log"
+
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}✗${NC} TTE failed for $CITY"
+    else
+        echo -e "${GREEN}✓${NC} TTE completed"
+    fi
 
     # STS (Similarity Search) - Contrastive learning, HRNR默认50 epochs
     echo -e "${BLUE}[2.3] Running STS (${TASK_EPOCH_STS} epochs)...${NC}"
