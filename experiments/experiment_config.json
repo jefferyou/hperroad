@@ -1,0 +1,75 @@
+{
+  "_comment": "多城市实验配置文件",
+
+  "datasets": {
+    "beijing": {
+      "code": "bj",
+      "enabled": true,
+      "note": "Beijing dataset"
+    },
+    "chengdu": {
+      "code": "cd",
+      "enabled": true,
+      "note": "Chengdu dataset"
+    },
+    "xian": {
+      "code": "xa",
+      "enabled": true,
+      "note": "Xi'an dataset"
+    },
+    "sanfrancisco": {
+      "code": "sf",
+      "enabled": true,
+      "note": "San Francisco dataset"
+    }
+  },
+
+  "training": {
+    "max_epoch": 100,
+    "seed": 0,
+    "learning_rate": 0.0001,
+    "gpu_id": 3,
+    "comment": "Pretraining configuration matching HRNR paper"
+  },
+
+  "downstream_tasks": {
+    "tsi": {
+      "enabled": true,
+      "epochs": 1,
+      "note": "Speed Inference - Ridge regression"
+    },
+    "tte": {
+      "enabled": true,
+      "epochs": 100,
+      "note": "Travel Time Estimation - LSTM based, HRNR default"
+    },
+    "sts": {
+      "enabled": true,
+      "epochs": 50,
+      "note": "Similarity Search - Contrastive learning, HRNR default"
+    }
+  },
+
+  "gpu_config": {
+    "train_gpu": 3,
+    "eval_gpus": [3, 4, 5, 6, 7],
+    "note": "Training uses single GPU, evaluation uses multi-GPU DataParallel"
+  },
+
+  "optimization": {
+    "apply_patches": true,
+    "preload_embeddings": true,
+    "batch_size": 512,
+    "num_workers": 8,
+    "pin_memory": true,
+    "persistent_workers": true,
+    "note": "Performance optimizations for Tesla V100S-32GB on Linux"
+  },
+
+  "execution": {
+    "run_order": ["xian", "beijing", "chengdu", "sanfrancisco"],
+    "continue_on_error": true,
+    "save_checkpoints": true,
+    "note": "Xi'an first as it's already tested"
+  }
+}
