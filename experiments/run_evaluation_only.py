@@ -44,13 +44,17 @@ def run_evaluation_only(args):
     print(f"Task Epochs: {args.task_epoch}")
     print("=" * 80)
 
-    # 检查embedding文件是否存在
-    embedding_path = os.path.join('veccity', 'cache', args.exp_id, 'evaluate_cache', 'road_embedding_HRNR_Hyperbolic_xa_128.npy')
-    if not os.path.exists(embedding_path):
-        print(f"ERROR: Embedding file not found at: {embedding_path}")
+    # 检查embedding文件是否存在（使用glob查找，因为文件名可能不完全匹配）
+    import glob
+    embedding_pattern = os.path.join('veccity', 'cache', args.exp_id, 'evaluate_cache', 'road_embedding_*.npy')
+    embedding_files = glob.glob(embedding_pattern)
+
+    if not embedding_files:
+        print(f"ERROR: No embedding files found matching pattern: {embedding_pattern}")
         print("Please run 'python run_training_only.py' first!")
         return
 
+    embedding_path = embedding_files[0]  # 使用找到的第一个
     print(f"✓ Found embedding file: {embedding_path}")
     print("=" * 80)
 
