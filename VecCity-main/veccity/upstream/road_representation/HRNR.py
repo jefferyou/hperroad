@@ -80,8 +80,8 @@ class HRNR(AbstractReprLearningModel):
             self._logger.info("epoch " + str(i) + ", processed " + str(count))
             for step, (train_set, train_label) in enumerate(train_dataloader):
                 model_optimizer.zero_grad()
-                train_set = train_set.clone().detach()
-                train_label = train_label.clone().detach()
+                train_set = train_set.clone().detach().to(self.device)
+                train_label = train_label.clone().detach().to(self.device)
                 pred = self.encode(train_set)
                 loss = ce_criterion(pred, train_label)
                 loss.backward(retain_graph=True)
@@ -126,14 +126,14 @@ class HRNR(AbstractReprLearningModel):
     def test_label_pred(self,  test_set, test_label, device):
         right = 0
         sum_num = 0
-        test_set = test_set.clone().detach()
+        test_set = test_set.clone().detach().to(device)
         pred = self.encode(test_set)
         pred_prob = F.softmax(pred, -1)
         pred_scores = pred_prob[:, 1]
-        auc = roc_auc_score(np.array(test_label), np.array(pred_scores.tolist()))
+        auc = roc_auc_score(np.array(test_label), np.array(pred_scores.cpu().tolist()))
         self._logger.info("auc: " + str(auc))
 
-        pred_loc = torch.argmax(pred, 1).tolist()
+        pred_loc = torch.argmax(pred, 1).cpu().tolist()
         right_pos = 0
         right_neg = 0
         wrong_pos = 0
