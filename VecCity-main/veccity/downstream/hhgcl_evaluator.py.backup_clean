@@ -178,6 +178,36 @@ def evaluation_reg(origin_X, origin_y, kfold=5, seed=42, output_dim=128,choice=1
     mae, rmse, mape, r2 = metrics_local(y_truths, y_preds)
     return mae, rmse, mape, r2
 
+
+# ===== OPTIMIZATION: Preloaded Embedding Wrapper =====
+class PreloadedEmbeddingWrapper:
+    """包装model，预加载embedding避免重复GNN计算"""
+    def __init__(self, original_model, embedding_array, device):
+        self.original_model = original_model
+        self.device = device
+        # 预加载embedding到GPU
+        self.embeddings = torch.from_numpy(embedding_array).float().to(device)
+        print(f"[OPTIMIZATION] Preloaded embeddings to {device}: shape={self.embeddings.shape}")
+
+    def encode(self, x):
+        """直接从预加载的embedding索引，避免重复GNN计算"""
+        if isinstance(x, torch.Tensor):
+            return self.embeddings[x.long()]
+        else:
+            indices = torch.tensor(x, dtype=torch.long, device=self.device)
+            return self.embeddings[indices]
+
+    def encode_sequence(self, batch):
+        """用于STS任务"""
+        path = batch['seq'][:,:,0]
+        return self.encode(path.view(-1)).view(path.shape[0], path.shape[1], -1)
+
+    def __getattr__(self, name):
+        """其他属性转发到原始model"""
+        return getattr(self.original_model, name)
+# ===== END OPTIMIZATION =====
+
+
 class HHGCLEvaluator(AbstractEvaluator):
 
     def __init__(self, config, data_feature):

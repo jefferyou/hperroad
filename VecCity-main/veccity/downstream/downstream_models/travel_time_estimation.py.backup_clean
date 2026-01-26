@@ -124,9 +124,9 @@ class TravelTimeEstimationModel(AbstractModel):
         eval_dataset = TimeEstimationDataset(eval_data_X,eval_lens,eval_data_y)
         test_dataset = TimeEstimationDataset(test_data_X,test_lens,test_data_y)
 
-        train_dataloader= DataLoader(train_dataset,batch_size=128,shuffle=True,num_workers=4)
-        eval_dataloader= DataLoader(eval_dataset,batch_size=128,shuffle=False,num_workers=4)
-        test_dataloader= DataLoader(test_dataset,batch_size=128,shuffle=False,num_workers=4)
+        train_dataloader= DataLoader(train_dataset,batch_size=512,shuffle=True,num_workers=8,pin_memory=True,persistent_workers=True)
+        eval_dataloader= DataLoader(eval_dataset,batch_size=512,shuffle=False,num_workers=8,pin_memory=True,persistent_workers=True)
+        test_dataloader= DataLoader(test_dataset,batch_size=512,shuffle=False,num_workers=8,pin_memory=True,persistent_workers=True)
 
         
         model = MLPReg(input_dim, hidden_dim, 2, nn.ReLU(), embedding_model,is_static,device,max_len).to(device)
