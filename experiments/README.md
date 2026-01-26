@@ -1,362 +1,287 @@
-# HRNR_Hyperbolic 实验指南
+# HRNR_Hyperbolic 实验脚本
 
-完整的实验流程和工具使用说明。
-
-## 目录结构
-
-```
-experiments/
-├── README.md                      # 本文件
-├── run_hrnr_hyperbolic.py        # 主实验运行脚本
-├── hyperparameter_tuning.py      # 超参数优化脚本
-├── visualization_tools.py         # 可视化工具
-├── quick_start.sh                # 快速启动脚本
-├── results/                      # 实验结果存储目录
-└── figures/                      # 可视化图片存储目录
-```
+完整的benchmark实验框架，支持多城市、多GPU加速训练。
 
 ## 快速开始
 
-### 1. 单次实验
-
-运行一次完整的训练和评估：
+### 1. 运行完整Benchmark（推荐）
 
 ```bash
-cd experiments
-python run_hrnr_hyperbolic.py \
+cd ~/Mingjie/hperroad/experiments
+bash run_full_benchmark.sh
+```
+
+这将自动完成：
+- ✓ 应用所有性能优化（预加载嵌入、DataLoader、多GPU）
+- ✓ 在4个城市上运行完整实验（Xi'an, Beijing, Chengdu, San Francisco）
+- ✓ 每个城市：预训练（100 epochs）+ 3个下游任务（TSI, TTE, STS）
+- ✓ 使用5个GPU（3,4,5,6,7）进行DataParallel加速
+
+**预期时间：** 16-20小时（4个城市）
+
+### 2. 单独运行某个阶段
+
+#### 仅预训练
+
+```bash
+python run_training_only.py \
     --dataset xa \
     --seed 0 \
+    --max_epoch 100 \
     --gpu True \
-    --gpu_id 0
+    --gpu_id 0 \
+    --train_gpu_ids 0 1 2 3 4
 ```
 
-### 2. 多随机种子实验
-
-运行多次实验以评估稳定性：
+#### 仅评估
 
 ```bash
-python run_hrnr_hyperbolic.py \
-    --mode multi_seed \
-    --num_runs 5 \
-    --dataset xa
+# 获取实验ID
+ls -t ../VecCity-main/veccity/cache/ | grep "hrnr_hyp_xa"
+
+# 运行评估
+python run_evaluation_only.py \
+    --exp_id hrnr_hyp_xa_s0_20260125_145753 \
+    --task all \
+    --task_epoch 100 \
+    --gpu_id 0 \
+    --eval_gpu_ids 0 1 2 3 4
 ```
 
-### 3. 消融实验
+## 文件说明
 
-测试不同组件的贡献：
+### 核心脚本
 
-```bash
-python run_hrnr_hyperbolic.py \
-    --mode ablation \
-    --dataset xa
-```
+| 文件 | 说明 |
+|------|------|
+| `run_full_benchmark.sh` | **完整benchmark脚本**（推荐使用） |
+| `run_training_only.py` | 独立的预训练脚本 |
+| `run_evaluation_only.py` | 独立的评估脚本 |
+| `apply_all_optimizations.py` | **统一优化脚本**（自动应用所有优化） |
 
-这会自动运行以下配置：
-- 完整模型（蕴含损失 + 对比损失）
-- 无蕴含损失
-- 无对比损失
-- 仅结构损失
+### 优化内容
 
-### 4. 模型对比
+`apply_all_optimizations.py` 会自动应用以下优化：
 
-对比HRNR和HRNR_Hyperbolic：
+1. **预加载嵌入优化** (100-1000x加速)
+   - 修改 `hhgcl_evaluator.py`
+   - 嵌入一次性加载到GPU，避免重复运行GNN
 
-```bash
-python run_hrnr_hyperbolic.py \
-    --mode comparison \
-    --dataset xa
-```
+2. **DataLoader优化** (2-3x加速)
+   - 修改 `travel_time_estimation.py` 和 `similarity_search_model.py`
+   - batch_size: 128 → 512
+   - num_workers: 4 → 8
+   - 启用 pin_memory 和 persistent_workers
 
-### 5. 超参数优化
+3. **多GPU支持** (3-4x加速)
+   - 修改 `twostep_executor.py`
+   - 使用PyTorch DataParallel分发训练到多个GPU
 
-#### 随机搜索（推荐）
-
-```bash
-python hyperparameter_tuning.py \
-    --method random \
-    --max_trials 50 \
-    --dataset xa \
-    --metric auc
-```
-
-#### 网格搜索
-
-```bash
-python hyperparameter_tuning.py \
-    --method grid \
-    --max_trials 100 \
-    --dataset xa
-```
-
-#### 使用自定义搜索空间
-
-创建搜索空间配置文件 `search_space.json`：
-
-```json
-{
-    "hyperbolic_dim": [128, 224, 256],
-    "lambda_ce": [0.05, 0.1, 0.15, 0.2],
-    "lambda_cc": [0.05, 0.1, 0.15, 0.2],
-    "temperature": [0.05, 0.07, 0.1],
-    "lp_learning_rate": [5e-5, 1e-4, 2e-4]
-}
-```
-
-然后运行：
-
-```bash
-python hyperparameter_tuning.py \
-    --search_space_file search_space.json \
-    --method random \
-    --max_trials 30
-```
-
-## 命令行参数详解
-
-### run_hrnr_hyperbolic.py
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--task` | str | road_representation | 任务类型 |
-| `--model` | str | HRNR_Hyperbolic | 模型名称 |
-| `--dataset` | str | xa | 数据集名称 |
-| `--mode` | str | single | 实验模式（single/multi_seed/ablation/comparison） |
-| `--gpu` | bool | True | 是否使用GPU |
-| `--gpu_id` | int | 0 | GPU编号 |
-| `--seed` | int | 0 | 随机种子 |
-| `--num_runs` | int | 5 | multi_seed模式下的运行次数 |
-| `--hyperbolic_dim` | int | 224 | 双曲空间维度 |
-| `--lambda_ce` | float | 0.1 | 蕴含损失权重 |
-| `--lambda_cc` | float | 0.1 | 对比损失权重 |
-| `--temperature` | float | 0.07 | 对比学习温度 |
-| `--learning_rate` | float | 1e-4 | 学习率 |
-| `--max_epoch` | int | 100 | 最大训练轮数 |
-
-### hyperparameter_tuning.py
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--method` | str | random | 搜索方法（grid/random/bayesian） |
-| `--max_trials` | int | 50 | 最大尝试次数 |
-| `--metric` | str | auc | 优化目标指标 |
-| `--mode` | str | max | 优化模式（max/min） |
-| `--search_space_file` | str | None | 搜索空间配置文件 |
-
-## 结果分析
-
-### 查看实验结果
-
-实验结果保存在 `results/` 目录下，包括：
-
-1. **单次实验结果**: JSON格式，包含所有评估指标
-2. **多随机种子汇总**: 包含每次运行的结果和统计信息
-3. **消融实验结果**: 各配置的对比
-4. **超参数优化结果**: 所有试验的记录和最佳配置
-
-### 可视化结果
-
-使用可视化工具分析结果：
-
-```python
-from visualization_tools import ExperimentVisualizer
-
-visualizer = ExperimentVisualizer()
-
-# 训练曲线
-visualizer.plot_training_curves('path/to/log.log')
-
-# 超参数重要性
-visualizer.plot_hyperparameter_importance('results/hypertuning_*.json')
-
-# 消融实验
-visualizer.plot_ablation_study('results/*_ablation_study.json')
-
-# 模型对比
-visualizer.plot_model_comparison('results/hrnr_comparison_*.json')
-
-# 嵌入可视化
-visualizer.plot_embedding_pca('path/to/embeddings.npy')
-```
-
-## 实验最佳实践
-
-### 1. 超参数调优流程
-
-推荐的调优顺序：
-
-1. **粗搜索**：使用随机搜索（30-50次），大范围探索
-   ```bash
-   python hyperparameter_tuning.py --method random --max_trials 50
-   ```
-
-2. **细搜索**：在最佳区域附近使用网格搜索
-   - 根据粗搜索结果缩小搜索空间
-   - 创建精细化的search_space.json
-   - 运行网格搜索
-
-3. **验证**：使用最佳配置运行多随机种子实验
-   ```bash
-   python run_hrnr_hyperbolic.py --mode multi_seed --num_runs 5
-   ```
-
-### 2. 重要超参数建议
-
-基于理论和经验的建议：
-
-| 超参数 | 推荐范围 | 说明 |
-|--------|----------|------|
-| `hyperbolic_dim` | [128, 256] | 与hidden_dims保持一致或接近 |
-| `lambda_ce` | [0.05, 0.2] | 蕴含损失权重，过大会过度约束 |
-| `lambda_cc` | [0.05, 0.2] | 对比损失权重，根据任务调整 |
-| `temperature` | [0.05, 0.1] | 温度越低对比越严格 |
-| `learning_rate` | [5e-5, 2e-4] | 双曲操作需要较小学习率 |
-| `dropout` | [0.5, 0.7] | 防止过拟合 |
-
-### 3. 消融实验建议
-
-测试各组件的贡献：
-
-1. **基线**: 完整模型
-2. **-蕴含**: lambda_ce=0（测试蕴含锥的作用）
-3. **-对比**: lambda_cc=0（测试对比学习的作用）
-4. **-双曲**: 使用原始HRNR（测试双曲空间的作用）
-
-### 4. 数据集选择
-
-VecCity支持多个数据集，推荐用于测试：
-
-- **xa**: 西安路网（中等规模，适合快速实验）
-- **bj**: 北京路网（大规模，测试scalability）
-- **porto**: Porto出租车数据（真实轨迹）
-
-## 常见问题
-
-### Q1: 训练很慢怎么办？
-
-**A**: 双曲操作比欧氏操作慢，可以：
-1. 减小batch_size
-2. 使用GPU加速
-3. 减少采样数量（在蕴含损失和对比损失中）
-4. 使用更小的模型维度
-
-### Q2: 显存不足怎么办？
-
-**A**:
-1. 减小batch_size
-2. 减小hyperbolic_dim
-3. 使用梯度累积（grad_accmu_steps）
-4. 减少层次数量
-
-### Q3: 如何选择最佳配置？
-
-**A**:
-1. 先运行超参数搜索
-2. 选择top-3配置
-3. 对每个配置运行5次多随机种子实验
-4. 选择均值最高且方差最小的配置
-
-### Q4: 如何复现论文结果？
-
-**A**:
-1. 使用固定随机种子
-2. 使用论文中的超参数配置
-3. 运行多次求平均（建议5次）
-4. 确保数据预处理一致
-
-## 高级用法
-
-### 1. 自定义实验配置
-
-创建配置文件 `custom_config.json`：
-
-```json
-{
-    "hyperbolic_dim": 256,
-    "lambda_ce": 0.15,
-    "lambda_cc": 0.12,
-    "temperature": 0.08,
-    "lp_learning_rate": 8e-5,
-    "max_epoch": 150,
-    "dropout": 0.6,
-    "alpha": 0.2
-}
-```
-
-使用自定义配置：
-
-```bash
-python run_hrnr_hyperbolic.py \
-    --config_file custom_config.json \
-    --dataset xa
-```
-
-### 2. 批量实验
-
-创建批量运行脚本 `batch_experiments.sh`：
-
-```bash
-#!/bin/bash
-
-datasets=("xa" "bj" "porto")
-seeds=(0 1 2 3 4)
-
-for dataset in "${datasets[@]}"; do
-    for seed in "${seeds[@]}"; do
-        echo "Running experiment: dataset=$dataset, seed=$seed"
-        python run_hrnr_hyperbolic.py \
-            --dataset $dataset \
-            --seed $seed \
-            --exp_id "batch_${dataset}_s${seed}"
-    done
-done
-```
-
-### 3. 分布式超参数搜索
-
-在多GPU上并行搜索：
-
-```bash
-# GPU 0
-CUDA_VISIBLE_DEVICES=0 python hyperparameter_tuning.py \
-    --max_trials 25 --seed 0 &
-
-# GPU 1
-CUDA_VISIBLE_DEVICES=1 python hyperparameter_tuning.py \
-    --max_trials 25 --seed 1 &
-
-wait
-```
+4. **DataParallel兼容性**
+   - 自动处理DataParallel包装的模型
+   - 添加 `_get_model()` 辅助方法
 
 ## 性能基准
 
-在xa数据集上的参考性能（单次运行）：
+### 单个城市（Xi'an为例）
 
-| 模型 | AUC | F1 | Precision | Recall |
-|------|-----|-------|-----------|--------|
-| HRNR (baseline) | 0.XXX | 0.XXX | 0.XXX | 0.XXX |
-| HRNR_Hyperbolic | 0.XXX | 0.XXX | 0.XXX | 0.XXX |
-| 提升 | +X.X% | +X.X% | +X.X% | +X.X% |
+| 阶段 | 单GPU时间 | 5-GPU时间 | 加速比 |
+|------|-----------|-----------|--------|
+| 预训练 (100 epochs) | ~12小时 | **3-3.5小时** | **3.4-4x** |
+| TSI | <1分钟 | <1分钟 | 1x |
+| TTE (100 epochs) | ~40小时 | **30-60分钟** | **40-80x** |
+| STS (50 epochs) | ~5.8小时 | **10-20分钟** | **17-35x** |
+| **总计** | ~58小时 | **~4-5小时** | **11-15x** |
 
-*注: 实际结果需要通过实验获得*
+### 完整Benchmark（4个城市）
 
-## 引用
+- **原始时间：** ~232小时（9.7天）
+- **优化后：** **16-20小时**
+- **加速比：** **11-15x**
 
-如果使用本实验框架，请引用：
+## GPU配置
 
-```bibtex
-@inproceedings{hrnr_hyperbolic2025,
-  title={HRNR with Hyperbolic Embeddings for Hierarchical Road Network Representation},
-  author={Your Name},
-  year={2025}
-}
+### 查看GPU状态
+
+```bash
+watch -n 1 nvidia-smi
 ```
+
+### 预期GPU使用
+
+- **GPU利用率：** 70-90%
+- **GPU功耗：** 200-240W（Tesla V100S-32GB）
+- **显存使用：** 15-20GB/GPU
+
+### 自定义GPU配置
+
+编辑 `run_full_benchmark.sh`:
+
+```bash
+TRAIN_GPUS="3,4,5,6,7"  # 修改为你想用的GPU
+EVAL_GPUS="3,4,5,6,7"
+```
+
+## 监控和日志
+
+### 查看实时日志
+
+```bash
+# 查看最新的benchmark结果
+ls -ltr results/
+
+# 查看特定城市的TTE训练日志
+tail -f results/benchmark_20260125_145751/xian_tte.log
+```
+
+### 结果文件位置
+
+```
+experiments/
+├── results/
+│   └── benchmark_TIMESTAMP/
+│       ├── xian_training.log    # Xi'an预训练日志
+│       ├── xian_tsi.log         # Xi'an TSI任务日志
+│       ├── xian_tte.log         # Xi'an TTE任务日志
+│       ├── xian_sts.log         # Xi'an STS任务日志
+│       ├── beijing_*.log
+│       ├── chengdu_*.log
+│       └── sanfrancisco_*.log
+```
+
+### CSV结果文件
+
+评估完成后，结果会保存在：
+
+```
+../VecCity-main/veccity/cache/EXPERIMENT_ID/evaluate_cache/
+├── SpeedInferenceModel_tsi_xa.csv
+├── TravelTimeEstimationModel_tte_xa.csv
+└── SimilaritySearchModel_sts_xa.csv
+```
+
+## 常见问题
+
+### 1. GPU内存不足
+
+如果遇到 `CUDA out of memory` 错误，编辑 `apply_all_optimizations.py`:
+
+```python
+# 第113行左右，减小batch_size
+content = content.replace(
+    'batch_size=128',
+    'batch_size=256'  # 从512改为256
+)
+```
+
+然后重新应用优化：
+
+```bash
+python apply_all_optimizations.py
+```
+
+### 2. 恢复原始文件
+
+所有修改的文件都有 `.backup_clean` 备份：
+
+```bash
+# 恢复单个文件
+cp ../VecCity-main/veccity/executor/twostep_executor.py.backup_clean \
+   ../VecCity-main/veccity/executor/twostep_executor.py
+
+# 恢复所有文件
+find ../VecCity-main -name "*.backup_clean" | while read backup; do
+    original="${backup%.backup_clean}"
+    cp "$backup" "$original"
+done
+```
+
+### 3. 清除Python缓存
+
+如果代码修改后没有生效：
+
+```bash
+find ../VecCity-main -name "*.pyc" -delete
+find ../VecCity-main -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null
+```
+
+### 4. AttributeError: 'TwoStepExecutor' object has no attribute 'cache_dir'
+
+这通常是因为 `twostep_executor.py` 结构损坏。修复方法：
+
+```bash
+# 从备份恢复
+cp ../VecCity-main/veccity/executor/twostep_executor.py.backup_clean \
+   ../VecCity-main/veccity/executor/twostep_executor.py
+
+# 重新应用优化
+python apply_all_optimizations.py
+
+# 清除缓存
+find ../VecCity-main -name "*.pyc" -delete
+find ../VecCity-main -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null
+```
+
+### 5. 只运行某些城市
+
+编辑 `run_full_benchmark.sh`:
+
+```bash
+# 第14行
+DATASET_MAP=("xian:xa" "beijing:bj")  # 只运行Xi'an和Beijing
+```
+
+## 技术细节
+
+### DataParallel工作原理
+
+```
+单GPU模式:
+  model.run() → 正常调用
+
+多GPU模式 (DataParallel):
+  torch.nn.DataParallel(model) →
+    DataParallel(
+      (module): HRNR_Hyperbolic(...)
+    )
+  model.forward() → 自动分发（内置方法）
+  model.run() → ❌ 错误（自定义方法不可见）
+  model.module.run() → ✅ 正确（通过module访问）
+
+解决方案:
+  def _get_model(self):
+      if isinstance(self.model, torch.nn.DataParallel):
+          return self.model.module
+      return self.model
+```
+
+### CUDA_VISIBLE_DEVICES
+
+```bash
+# 物理GPU: 0, 1, 2, 3, 4, 5, 6, 7
+# 设置可见GPU为3,4,5,6,7
+CUDA_VISIBLE_DEVICES=3,4,5,6,7
+
+# 映射后的逻辑GPU: 0, 1, 2, 3, 4
+# device_ids=[0,1,2,3,4]  ✓ 正确
+# device_ids=[3,4,5,6,7]  ✗ 错误（超出逻辑范围）
+```
+
+## 实验配置（匹配HRNR论文）
+
+| 参数 | 值 |
+|------|-----|
+| 预训练轮数 | 100 |
+| TTE任务轮数 | 100 |
+| STS任务轮数 | 50 |
+| TSI任务轮数 | 10（Ridge回归，快速）|
+| 城市 | Xi'an, Beijing, Chengdu, San Francisco |
+| GPU数量 | 5 (Tesla V100S-32GB) |
 
 ## 联系方式
 
-如有问题或建议，请联系：
-- Email: your.email@example.com
-- GitHub Issues: https://github.com/yourusername/hperroad/issues
-
----
-
-**祝实验顺利！**
+遇到问题？检查：
+1. 日志文件：`results/benchmark_*/`
+2. Python缓存：`find ../VecCity-main -name "*.pyc"`
+3. GPU状态：`nvidia-smi`
+4. 备份文件：`find ../VecCity-main -name "*.backup_clean"`
