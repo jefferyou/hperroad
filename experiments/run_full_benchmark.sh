@@ -14,7 +14,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # 配置参数
-DATASET_MAP=("xian:xa" "beijing:bj" "chengdu:cd" "sanfrancisco:sf")
+DATASET_MAP=("sanfrancisco:sf" "porto:po" "chengdu:cd" "beijing:bj")
 
 # 训练参数
 MAX_EPOCH=100
