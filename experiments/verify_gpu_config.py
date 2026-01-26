@@ -101,7 +101,7 @@ def check_config_files():
             continue
 
         try:
-            with open(config_path, 'r') as f:
+            with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
 
             gpu_enabled = config.get('gpu', False)
@@ -151,7 +151,7 @@ def check_experiment_scripts():
             continue
 
         try:
-            with open(script_path, 'r') as f:
+            with open(script_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
             # 检查GPU参数传递
@@ -182,7 +182,7 @@ def generate_gpu_config_summary():
 
     summary_file = Path(__file__).parent / 'GPU_CONFIG_SUMMARY.md'
 
-    with open(summary_file, 'w') as f:
+    with open(summary_file, 'w', encoding='utf-8') as f:
         f.write("# GPU Configuration Summary\n\n")
         f.write("## Configuration Files\n\n")
         f.write("### HRNR.json & HRNR_Hyperbolic.json\n\n")
