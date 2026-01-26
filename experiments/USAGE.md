@@ -1,4 +1,4 @@
-# 快速使用指南
+# 快速使用指南 - 支持断点续传
 
 ## 第一步：拉取最新代码
 
@@ -22,6 +22,37 @@ bash run_full_benchmark.sh
 ```
 
 就这么简单！
+
+## ⭐ 新功能：自动断点续传
+
+**脚本会自动保存进度！** 如果中途中断（停电、SSH断线、错误等），只需重新运行相同命令：
+
+```bash
+bash run_full_benchmark.sh
+```
+
+脚本会：
+- ✅ 自动检测已完成的任务并跳过
+- ✅ 从中断的地方继续运行
+- ✅ 使用相同的结果目录
+- ✅ 保留所有已完成的结果
+
+### 示例：中断后恢复
+
+```bash
+# 首次运行
+bash run_full_benchmark.sh
+# 输出：Processing Xi'an... ✓ Training completed
+#      Processing Beijing... ✗ TTE failed (interrupted)
+
+# 稍后恢复（会自动跳过Xi'an）
+bash run_full_benchmark.sh
+# 输出：RESUMING FROM PREVIOUS RUN
+#      [SKIP] Xi'an training already completed
+#      Processing Beijing... [SKIP] Training already completed
+#                          [SKIP] TSI already completed
+#                          Starting TTE from beginning...
+```
 
 ## 会发生什么？
 
@@ -60,6 +91,59 @@ ls -ltr results/
 
 # 实时查看Xi'an的TTE训练
 tail -f results/benchmark_*/xian_tte.log
+```
+
+## 进度管理
+
+### 查看当前进度
+
+```bash
+# 查看状态文件
+cat .benchmark_state
+
+# 示例输出：
+# RESULTS_DIR="results/benchmark_20260125_145751"
+# xian_training=completed
+# xian_exp_id="hrnr_hyp_xa_s0_20260125_145753"
+# xian_tsi=completed
+# xian_tte=completed
+# xian_sts=completed
+# beijing_training=completed
+# beijing_exp_id="hrnr_hyp_bj_s0_20260125_152130"
+```
+
+### 重新开始（丢弃当前进度）
+
+```bash
+# 删除状态文件
+rm .benchmark_state
+
+# 重新运行
+bash run_full_benchmark.sh
+```
+
+### 只运行特定城市
+
+如果某个城市经常失败，可以编辑脚本只运行它：
+
+```bash
+# 编辑 run_full_benchmark.sh
+nano run_full_benchmark.sh
+
+# 第17行改为：
+DATASET_MAP=("beijing:bj")  # 只运行Beijing
+
+# 保存后运行
+bash run_full_benchmark.sh
+```
+
+### 手动标记任务完成
+
+如果你确定某个任务已经完成但脚本不识别：
+
+```bash
+# 在.benchmark_state中添加
+echo "beijing_tte=completed" >> .benchmark_state
 ```
 
 ## 如果出错
