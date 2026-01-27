@@ -386,7 +386,9 @@ class HHGCLEvaluator(AbstractEvaluator):
             embedding_path = self.region_embedding_path
         emb_vec = np.load(embedding_path)
         emb=model
-        self._logger.info(f'Load {self.representation_object} emb {embedding_path}, shape = {emb.output_dim}')
+        # Handle DataParallel wrapper - access underlying model's attributes via .module
+        output_dim = emb.module.output_dim if hasattr(emb, 'module') else emb.output_dim
+        self._logger.info(f'Load {self.representation_object} emb {embedding_path}, shape = {output_dim}')
         
         def add_prefix_to_keys(dictionary, prefix):
             new_dictionary = {}
