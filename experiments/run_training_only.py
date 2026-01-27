@@ -28,16 +28,25 @@ def parse_args():
     parser.add_argument('--gpu_id', type=int, default=0, help='GPU ID (primary GPU)')
     parser.add_argument('--train_gpu_ids', type=int, nargs='+', default=None,
                         help='GPU IDs for multi-GPU training (e.g., 3 4 5 6 7)')
+    parser.add_argument('--exp_id', type=int, default=None,
+                        help='Experiment ID to resume from (optional)')
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume from existing embeddings and skip completed tasks')
     return parser.parse_args()
 
 def run_training_only(args):
     """只运行上游训练，保存模型和embedding"""
     print("=" * 80)
-    print("Running HRNR_Hyperbolic TRAINING ONLY")
+    if args.resume:
+        print("Running HRNR_Hyperbolic with RESUME MODE")
+    else:
+        print("Running HRNR_Hyperbolic TRAINING ONLY")
     print(f"Dataset: {args.dataset}")
     print(f"Seed: {args.seed}")
     print(f"Max Epoch: {args.max_epoch}")
     print(f"GPU: {args.gpu} (ID: {args.gpu_id})")
+    if args.exp_id:
+        print(f"Experiment ID: {args.exp_id}")
     print("=" * 80)
 
     # 准备参数
@@ -51,6 +60,21 @@ def run_training_only(args):
         'evaluate_tasks': [],
         'evaluate_models': [],
     }
+
+    # Resume模式：如果指定了exp_id且resume标志为True
+    if args.resume:
+        if args.exp_id is not None:
+            other_args['exp_id'] = args.exp_id
+            other_args['skip_if_embeddings_exist'] = True
+            print(f"\nResume Mode: Using exp_id={args.exp_id}")
+            print("Will skip training if embeddings already exist")
+            print("Will skip completed downstream tasks")
+        else:
+            print("\nWarning: --resume requires --exp_id to be specified")
+            print("Continuing with normal training mode...")
+    elif args.exp_id is not None:
+        # 只指定exp_id但不resume，用于继续同一个实验
+        other_args['exp_id'] = args.exp_id
 
     # 多GPU训练支持
     if args.train_gpu_ids and len(args.train_gpu_ids) > 1:
@@ -70,12 +94,17 @@ def run_training_only(args):
     )
 
     print("\n" + "=" * 80)
-    print("TRAINING COMPLETE!")
+    if args.resume:
+        print("RESUME COMPLETE!")
+    else:
+        print("TRAINING COMPLETE!")
     print("=" * 80)
     print("Model and embeddings have been saved to:")
-    print(f"  ./veccity/cache/<exp_id>/model_cache/")
-    print(f"  ./veccity/cache/<exp_id>/evaluate_cache/")
+    exp_id = other_args.get('exp_id', '<exp_id>')
+    print(f"  ./veccity/cache/{exp_id}/model_cache/")
+    print(f"  ./veccity/cache/{exp_id}/evaluate_cache/")
     print("\nNext step: Run 'run_evaluation_only.py' with the generated exp_id")
+    print("Or use --resume --exp_id={} to continue from here".format(exp_id))
     print("=" * 80)
 
     return result

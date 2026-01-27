@@ -379,6 +379,53 @@ class HHGCLEvaluator(AbstractEvaluator):
         except AttributeError:
             raise AttributeError('evaluate model is not found')
 
+    def _check_task_completed(self, task):
+        """检测下游任务是否已经完成"""
+        result_path = './veccity/cache/{}/evaluate_cache/{}_evaluate_{}_{}_{}_{}.csv'.format(
+            self.exp_id, self.exp_id, self.model_name, self.dataset, str(self.output_dim), str(self.choice))
+
+        if not os.path.exists(result_path):
+            return False
+
+        try:
+            df = pd.read_csv(result_path)
+            # 检查该任务的结果列是否存在
+            task_columns = {
+                'sts': ['sts_HR@1', 'sts_HR@5', 'sts_HR@10'],
+                'tte': ['tte_MAE', 'tte_RMSE', 'tte_MAPE'],
+                'tsi': ['tsi_Macro-F1', 'tsi_Micro-F1'],
+                'FI': ['mae', 'rmse', 'mape', 'r2'],
+                'MI': ['bilinear_mae', 'bilinear_rmse', 'bilinear_mape', 'bilinear_r2'],
+                'LPC': ['clf_micro_f1', 'clf_macro_f1']
+            }
+
+            if task in task_columns:
+                # 检查是否所有相关列都存在且有值
+                for col in task_columns[task]:
+                    if col not in df.columns or df[col].isna().all():
+                        return False
+                return True
+        except Exception as e:
+            self._logger.warning(f'Error checking task {task} completion: {e}')
+            return False
+
+        return False
+
+    def _load_completed_results(self):
+        """从已有的结果文件中加载已完成的任务结果"""
+        result_path = './veccity/cache/{}/evaluate_cache/{}_evaluate_{}_{}_{}_{}.csv'.format(
+            self.exp_id, self.exp_id, self.model_name, self.dataset, str(self.output_dim), str(self.choice))
+
+        if os.path.exists(result_path):
+            try:
+                df = pd.read_csv(result_path)
+                for col in df.columns:
+                    if not df[col].isna().all():
+                        self.result[col] = df[col].tolist()
+                self._logger.info(f'Loaded previous results from {result_path}')
+            except Exception as e:
+                self._logger.warning(f'Error loading previous results: {e}')
+
     def evaluate_embedding(self, model=None,**kwargs):
         if self.representation_object == 'road':
             embedding_path = self.road_embedding_path
@@ -389,7 +436,10 @@ class HHGCLEvaluator(AbstractEvaluator):
         # Handle DataParallel wrapper - access underlying model's attributes via .module
         output_dim = emb.module.output_dim if hasattr(emb, 'module') else emb.output_dim
         self._logger.info(f'Load {self.representation_object} emb {embedding_path}, shape = {output_dim}')
-        
+
+        # 加载已完成的结果（如果有）
+        self._load_completed_results()
+
         def add_prefix_to_keys(dictionary, prefix):
             new_dictionary = {}
             for key, value in dictionary.items():
@@ -401,8 +451,14 @@ class HHGCLEvaluator(AbstractEvaluator):
         if self.representation_object == 'road':
             evaluate_tasks = self.config.get("evaluate_tasks", ["sts","tte","tsi"])
             evaluate_models = self.config.get("evaluate_models", ["SpeedInferenceModel"])#,"SpeedInferenceModel"])#, "SimilaritySearchModel"])
-                
+
             for task, model_name in zip(evaluate_tasks, evaluate_models):
+                # 检查任务是否已完成
+                if self._check_task_completed(task):
+                    self._logger.info(f'Task {task} already completed, skipping...')
+                    continue
+
+                self._logger.info(f'Running task {task}...')
                 downstream_model = self.get_downstream_model(model_name)
                 if task in ["tsi"]:
                     label = self.data_label[task]
@@ -415,7 +471,7 @@ class HHGCLEvaluator(AbstractEvaluator):
                 self.result.update(add_prefix_to_keys(result, task + '_'))
             if 'tte_best epoch' in self.result.keys():
                 del self.result['tte_best epoch']
-        
+
         elif self.representation_object == 'region':
             evaluate_tasks = self.config.get("evaluate_tasks", ["eci"])
             evaluate_models = self.config.get("evaluate_models", ["RegressionModel"])
@@ -426,27 +482,39 @@ class HHGCLEvaluator(AbstractEvaluator):
             #     label = self.data_label[task]
             #     result = downstream_model.run(emb, label)
             #     self.result.update(add_prefix_to_keys(result, task + '_'))
-            
+
             if 'FI' in evaluate_tasks:
-                mae, rmse, r2, mape = self._valid_flow(emb_vec)
-                self.result['mae'] = [mae]
-                self.result['rmse'] = [rmse]
-                self.result['mape'] = [mape]
-                self.result['r2'] = [r2]
+                if self._check_task_completed('FI'):
+                    self._logger.info('Task FI already completed, skipping...')
+                else:
+                    self._logger.info('Running task FI...')
+                    mae, rmse, r2, mape = self._valid_flow(emb_vec)
+                    self.result['mae'] = [mae]
+                    self.result['rmse'] = [rmse]
+                    self.result['mape'] = [mape]
+                    self.result['r2'] = [r2]
 
             if 'MI' in evaluate_tasks:
-                bilinear_mae,bilinear_rmse,bilinear_r2,bilinear_mape = self._valid_flow_using_bilinear(emb_vec)
-                self.result['bilinear_mae'] = [bilinear_mae]
-                self.result['bilinear_rmse'] = [bilinear_rmse]
-                self.result['bilinear_mape'] = [bilinear_mape]
-                self.result['bilinear_r2'] = [bilinear_r2]
+                if self._check_task_completed('MI'):
+                    self._logger.info('Task MI already completed, skipping...')
+                else:
+                    self._logger.info('Running task MI...')
+                    bilinear_mae,bilinear_rmse,bilinear_r2,bilinear_mape = self._valid_flow_using_bilinear(emb_vec)
+                    self.result['bilinear_mae'] = [bilinear_mae]
+                    self.result['bilinear_rmse'] = [bilinear_rmse]
+                    self.result['bilinear_mape'] = [bilinear_mape]
+                    self.result['bilinear_r2'] = [bilinear_r2]
 
             if 'LPC' in evaluate_tasks:
                 if self.config.get(f'{self.representation_object}_clf_label', None) is not None:
-                    self._logger.warning(f'Evaluating {self.representation_object} Classification')
-                    y_truth,useful_index,micro_f1, macro_f1 = self._valid_clf(emb_vec)
-                    self.result['clf_micro_f1'] = [micro_f1]
-                    self.result['clf_macro_f1'] = [macro_f1]
+                    if self._check_task_completed('LPC'):
+                        self._logger.info('Task LPC already completed, skipping...')
+                    else:
+                        self._logger.info('Running task LPC...')
+                        self._logger.warning(f'Evaluating {self.representation_object} Classification')
+                        y_truth,useful_index,micro_f1, macro_f1 = self._valid_clf(emb_vec)
+                        self.result['clf_micro_f1'] = [micro_f1]
+                        self.result['clf_macro_f1'] = [macro_f1]
 
     def get_downstream_model(self, model):
         try:

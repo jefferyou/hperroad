@@ -32,12 +32,18 @@ def parse_args():
                         help='Epochs for downstream tasks (TTE/STS)')
     parser.add_argument('--dataset', type=str, default='xa', help='Dataset name')
     parser.add_argument('--model', type=str, default='HRNR_Hyperbolic', help='Model name')
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume from existing results and skip completed tasks')
     return parser.parse_args()
 
 def run_evaluation_only(args):
     """只运行下游评估，使用已保存的embedding"""
     print("=" * 80)
-    print("Running DOWNSTREAM EVALUATION ONLY")
+    if args.resume:
+        print("Running DOWNSTREAM EVALUATION (RESUME MODE)")
+        print("Will skip already completed tasks")
+    else:
+        print("Running DOWNSTREAM EVALUATION ONLY")
     print(f"Experiment ID: {args.exp_id}")
     print(f"Task: {args.task}")
     print(f"GPU: {args.gpu} (ID: {args.gpu_id})")
