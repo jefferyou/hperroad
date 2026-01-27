@@ -37,14 +37,14 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         self.output_dim = config.get('output_dim', 128)
         self.label_num = data_feature.get('label_class')
 
-        self.struct_assign = data_feature.get("struct_assign")
-        self.fnc_assign = data_feature.get("fnc_assign")
+        self.struct_assign = data_feature.get("struct_assign").to(self.device)
+        self.fnc_assign = data_feature.get("fnc_assign").to(self.device)
         adj = data_feature.get("adj_mx")
         self.adj = get_sparse_adj(adj, self.device)
-        self.lane_feature = data_feature.get("lane_feature")
-        self.type_feature = data_feature.get("type_feature")
-        self.length_feature = data_feature.get("length_feature")
-        self.node_feature = data_feature.get("node_feature")
+        self.lane_feature = data_feature.get("lane_feature").to(self.device)
+        self.type_feature = data_feature.get("type_feature").to(self.device)
+        self.length_feature = data_feature.get("length_feature").to(self.device)
+        self.node_feature = data_feature.get("node_feature").to(self.device)
         self.hidden_dims = config.get("hidden_dims")
         hparams = dict_to_object(config.config)
 
@@ -627,7 +627,7 @@ class SpecialSpmmFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, indices, values, shape, b):
         assert indices.requires_grad == False
-        a = torch.sparse_coo_tensor(indices, values, shape)
+        a = torch.sparse_coo_tensor(indices, values, shape, device=b.device)
         ctx.save_for_backward(a, b)
         ctx.N = shape[0]
         return torch.matmul(a, b)
