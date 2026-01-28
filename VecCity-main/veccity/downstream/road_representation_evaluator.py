@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from logging import getLogger
 from veccity.downstream.abstract_evaluator import AbstractEvaluator
+from veccity.downstream.embedding_wrapper import EmbeddingWrapper
 
 
 class RoadRepresentationEvaluator(AbstractEvaluator):
@@ -66,9 +67,16 @@ class RoadRepresentationEvaluator(AbstractEvaluator):
                 writer.writerow(dictionary)
 
         road_emb = np.load(self.embedding_path)  # (N, F)
+
+        # 获取设备配置
+        device = self.config.get('device', 'cpu')
+
+        # 包装embeddings以提供encode接口，避免下游任务重新运行模型
+        embedding_wrapper = EmbeddingWrapper(road_emb, device=device)
+
         for task, model in zip(self.evaluate_tasks, self.evaluate_model):
             downstream_model = self.get_downstream_model(model)
-            x = road_emb
+            x = embedding_wrapper  # 使用wrapper而不是原始numpy数组
             label = self.data_feature["label"][task]
             result = downstream_model.run(x, label)
             self.result.update(add_prefix_to_keys(result, task + '_'))
