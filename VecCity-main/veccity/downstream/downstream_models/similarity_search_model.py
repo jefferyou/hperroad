@@ -115,26 +115,19 @@ class STSModel(nn.Module):
     def calculate_loss(self,batch1,batch2):
         out_view1=self.forward(batch1)
         out_view2=self.forward(batch2)
-        # out_view1 = F.normalize(out_view1, dim=-1)
-        # out_view2 = F.normalize(out_view2, dim=-1)
 
-        # similarity_matrix = F.cosine_similarity(out_view1.unsqueeze(1), out_view2.unsqueeze(0), dim=-1)
-        similarity_matrix = torch.cdist(out_view1,out_view2)
-        # 分类loss，轨迹模型精度下降
-        # labels = torch.arange(similarity_matrix.shape[0]).long().to(self.device)
-        # loss_res = self.criterion(similarity_matrix, labels)
-        # 二分类loss，只计算对角线的对错
-        index=torch.eye(similarity_matrix.shape[0]).bool()
-        preds=similarity_matrix[index]
-        labels=torch.ones(similarity_matrix.shape[0]).to(self.device)
-        loss_res=self.criterion(preds,labels)
-        # # infoNCE
-        # # 只计算正样本对（对角线）
-        # logits = torch.matmul(out_view1, out_view2.T) / self.temperature
-        # # 构造标签：每个样本的正样本为同一位置，即对角线
-        # labels = torch.arange(logits.shape[0]).to(self.device)
-        # # 使用交叉熵损失，最大化正样本对的相似度，同时降低负样本对的相似度
-        # loss_res = F.cross_entropy(logits, labels)
+        # L2 normalization for better training stability
+        out_view1 = F.normalize(out_view1, dim=-1)
+        out_view2 = F.normalize(out_view2, dim=-1)
+
+        # InfoNCE loss: compute cosine similarity matrix (normalized dot product)
+        logits = torch.matmul(out_view1, out_view2.T) / self.temperature
+
+        # Labels: diagonal positions (positive pairs)
+        labels = torch.arange(logits.shape[0]).long().to(self.device)
+
+        # Cross-entropy loss: maximize positive pair similarity, minimize negative pair similarity
+        loss_res = self.criterion(logits, labels)
         return loss_res
 
 class SimilaritySearchModel(AbstractModel):
