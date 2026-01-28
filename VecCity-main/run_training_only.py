@@ -45,7 +45,7 @@ def parse_args():
     parser.add_argument('--config_file', type=str, default=None,
                         help='Config file path (optional)')
     parser.add_argument('--device', type=str, default='cpu',
-                        help='Device to use (cpu or cuda, default: cpu)')
+                        help='Device to use (cpu, cuda, gpu, or cuda:0, default: cpu)')
     parser.add_argument('--seed', type=int, default=31,
                         help='Random seed (default: 31)')
     parser.add_argument('--exp_id', type=str, default=None,
@@ -65,12 +65,28 @@ def run_training_only(args):
     # 生成或使用指定的exp_id
     exp_id = args.exp_id if args.exp_id else int(random.SystemRandom().random() * 100000)
 
+    # 处理设备配置：将device参数映射到gpu和gpu_id
+    if args.device.lower() in ['gpu', 'cuda']:
+        use_gpu = True
+        gpu_id = 0
+        device_name = 'cuda'
+    elif args.device.lower().startswith('cuda:'):
+        use_gpu = True
+        gpu_id = int(args.device.split(':')[1])
+        device_name = args.device
+    else:
+        use_gpu = False
+        gpu_id = 0
+        device_name = 'cpu'
+
     # 构建other_args字典
     other_args = {
         'task': args.task,
         'model': args.model,
         'dataset': args.dataset,
-        'device': args.device,
+        'gpu': use_gpu,           # ConfigParser使用这个
+        'gpu_id': gpu_id,         # ConfigParser使用这个
+        'device': device_name,    # 模型训练使用这个
         'seed': args.seed,
         'exp_id': exp_id,
     }

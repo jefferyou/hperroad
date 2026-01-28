@@ -49,7 +49,7 @@ def parse_args():
     parser.add_argument('--config_file', type=str, default=None,
                         help='Config file path (optional)')
     parser.add_argument('--device', type=str, default='cpu',
-                        help='Device to use (cpu or cuda, default: cpu)')
+                        help='Device to use (cpu, cuda, gpu, or cuda:0, default: cpu)')
     parser.add_argument('--seed', type=int, default=31,
                         help='Random seed (default: 31)')
 
@@ -101,12 +101,28 @@ def run_downstream_evaluation(args):
     # 设置随机种子
     set_random_seed(args.seed)
 
+    # 处理设备配置：将device参数映射到gpu和gpu_id
+    if args.device.lower() in ['gpu', 'cuda']:
+        use_gpu = True
+        gpu_id = 0
+        device_name = 'cuda'
+    elif args.device.lower().startswith('cuda:'):
+        use_gpu = True
+        gpu_id = int(args.device.split(':')[1])
+        device_name = args.device
+    else:
+        use_gpu = False
+        gpu_id = 0
+        device_name = 'cpu'
+
     # 构建other_args字典
     other_args = {
         'task': args.task,
         'model': args.model,
         'dataset': args.dataset,
-        'device': args.device,
+        'gpu': use_gpu,           # ConfigParser使用这个
+        'gpu_id': gpu_id,         # ConfigParser使用这个
+        'device': device_name,    # 下游任务直接使用这个
         'output_dim': args.output_dim,
         'evaluate_task': args.evaluate_task,
         'seed': args.seed,
