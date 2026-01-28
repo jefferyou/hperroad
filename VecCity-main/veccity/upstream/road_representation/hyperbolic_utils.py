@@ -2,6 +2,7 @@
 Hyperbolic Utilities for Lorentz Model
 基于HyCoCLIP的双曲空间操作工具
 优化版本：应用数值稳定性和性能优化
+包含切空间优化：在切空间做线性操作，在双曲空间做距离计算
 """
 
 import torch
@@ -10,7 +11,7 @@ import torch.nn.functional as F
 import numpy as np
 from .hyperbolic_optimizations import (
     cosh, sinh, tanh, Arcosh, Artanh, AdaptiveEpsilon,
-    lorentz_distance_with_clipping
+    lorentz_distance_with_clipping, exp_map_zero, log_map_zero
 )
 
 
@@ -276,15 +277,23 @@ class EntailmentCone:
 
 class HyperbolicGraphConv(nn.Module):
     """
-    双曲空间图卷积层
+    双曲空间图卷积层（切空间优化版本）
     在Lorentz空间中进行消息传递
+
+    优化策略：
+    1. 输入映射到切空间（log_map_zero）
+    2. 在切空间聚合邻居（欧式操作）
+    3. 在切空间线性变换
+    4. 映射回双曲空间（exp_map_zero）
     """
 
-    def __init__(self, in_dim, out_dim, manifold=None, use_bias=True):
+    def __init__(self, in_dim, out_dim, manifold=None, use_bias=True, c=1.0, use_tangent_opt=True):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
         self.manifold = manifold if manifold is not None else LorentzManifold()
+        self.c = c
+        self.use_tangent_opt = use_tangent_opt  # 是否使用切空间优化
 
         # 切空间中的线性变换
         self.weight = nn.Parameter(torch.Tensor(in_dim, out_dim))
@@ -296,7 +305,7 @@ class HyperbolicGraphConv(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.xavier_uniform_(self.weight)
+        nn.init.xavier_uniform_(self.weight, gain=0.01)  # 小初始化避免越界
         if self.bias is not None:
             nn.init.zeros_(self.bias)
 
@@ -304,54 +313,83 @@ class HyperbolicGraphConv(nn.Module):
         """
         Args:
             x: shape [N, in_dim+1] 双曲空间节点特征
-            adj: shape [N, N] 邻接矩阵
+            adj: shape [N, N] or sparse tensor 邻接矩阵
         Returns:
             out: shape [N, out_dim+1] 更新后的双曲特征
         """
-        # 1. 映射到切空间（在原点处）
-        origin = torch.zeros_like(x[:1])
-        origin[0, 0] = 1.0
+        N = x.size(0)
 
-        # 提取空间部分进行变换
-        x_tangent = x[:, 1:]  # shape [N, in_dim]
+        if self.use_tangent_opt:
+            # ========== 切空间优化版本 ==========
+            # 1. 映射到切空间（使用零点映射）
+            x_tangent = log_map_zero(x[:, 1:], self.c)  # [N, in_dim]
 
-        # 2. 在切空间中聚合邻居
-        # 归一化邻接矩阵
-        # Handle sparse adjacency matrix efficiently
-        if adj.is_sparse:
-            # Use sparse operations to avoid expensive dense conversion
-            # Calculate degree by summing sparse matrix rows
-            adj_values = adj._values()
-            adj_indices = adj._indices()
+            # 2. 在切空间中聚合邻居（欧式操作）
+            if adj.is_sparse:
+                # 稀疏矩阵操作（O(E)复杂度）
+                adj_values = adj._values()
+                adj_indices = adj._indices()
 
-            # Compute row-wise degree
-            N = adj.size(0)
-            deg = torch.zeros(N, 1, device=adj.device, dtype=adj_values.dtype)
-            deg.index_add_(0, adj_indices[0], adj_values.unsqueeze(1))
-            deg = deg + 1e-7
+                # 计算度数
+                deg = torch.zeros(N, 1, device=adj.device, dtype=adj_values.dtype)
+                deg.index_add_(0, adj_indices[0], adj_values.unsqueeze(1))
+                deg = deg + 1e-7
 
-            # Normalize edge weights: divide each edge by source node degree
-            adj_norm_values = adj_values / deg[adj_indices[0]].squeeze()
-            adj_norm = torch.sparse_coo_tensor(
-                adj_indices, adj_norm_values, adj.size(),
-                dtype=adj.dtype, device=adj.device
-            )
+                # 归一化边权重
+                adj_norm_values = adj_values / deg[adj_indices[0]].squeeze()
+                adj_norm = torch.sparse_coo_tensor(
+                    adj_indices, adj_norm_values, adj.size(),
+                    dtype=adj.dtype, device=adj.device
+                )
 
-            # Sparse-dense matrix multiplication
-            agg = torch.sparse.mm(adj_norm, x_tangent)  # [N, in_dim]
+                # 稀疏聚合
+                agg_tangent = torch.sparse.mm(adj_norm, x_tangent)  # [N, in_dim]
+            else:
+                # 密集矩阵操作
+                deg = adj.sum(dim=1, keepdim=True) + 1e-7
+                adj_norm = adj / deg
+                agg_tangent = torch.matmul(adj_norm, x_tangent)  # [N, in_dim]
+
+            # 3. 在切空间做线性变换（欧式操作）
+            out_tangent = torch.matmul(agg_tangent, self.weight)  # [N, out_dim]
+            if self.bias is not None:
+                out_tangent = out_tangent + self.bias
+
+            # 4. 映射回双曲空间（使用零点映射）
+            out_spatial = exp_map_zero(out_tangent, self.c)  # [N, out_dim]
+
+            # 5. 投影到Lorentz流形
+            out = self.manifold.project_to_lorentz(out_spatial, k=self.c)
+
         else:
-            # Dense adjacency matrix
-            deg = adj.sum(dim=1, keepdim=True) + 1e-7
-            adj_norm = adj / deg
-            agg = torch.matmul(adj_norm, x_tangent)  # [N, in_dim]
+            # ========== 原始版本（直接提取空间部分）==========
+            x_tangent = x[:, 1:]  # [N, in_dim]
 
-        # 3. 线性变换
-        out_tangent = torch.matmul(agg, self.weight)  # [N, out_dim]
-        if self.bias is not None:
-            out_tangent = out_tangent + self.bias
+            # 聚合邻居
+            if adj.is_sparse:
+                adj_values = adj._values()
+                adj_indices = adj._indices()
+                deg = torch.zeros(N, 1, device=adj.device, dtype=adj_values.dtype)
+                deg.index_add_(0, adj_indices[0], adj_values.unsqueeze(1))
+                deg = deg + 1e-7
+                adj_norm_values = adj_values / deg[adj_indices[0]].squeeze()
+                adj_norm = torch.sparse_coo_tensor(
+                    adj_indices, adj_norm_values, adj.size(),
+                    dtype=adj.dtype, device=adj.device
+                )
+                agg = torch.sparse.mm(adj_norm, x_tangent)
+            else:
+                deg = adj.sum(dim=1, keepdim=True) + 1e-7
+                adj_norm = adj / deg
+                agg = torch.matmul(adj_norm, x_tangent)
 
-        # 4. 投影回双曲空间
-        out = self.manifold.project_to_lorentz(out_tangent)
+            # 线性变换
+            out_tangent = torch.matmul(agg, self.weight)
+            if self.bias is not None:
+                out_tangent = out_tangent + self.bias
+
+            # 投影回双曲空间
+            out = self.manifold.project_to_lorentz(out_tangent)
 
         return out
 
