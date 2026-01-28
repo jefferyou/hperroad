@@ -437,6 +437,13 @@ class HHGCLEvaluator(AbstractEvaluator):
         output_dim = emb.module.output_dim if hasattr(emb, 'module') else emb.output_dim
         self._logger.info(f'Load {self.representation_object} emb {embedding_path}, shape = {output_dim}')
 
+        # === CRITICAL OPTIMIZATION: Use PreloadedEmbeddingWrapper ===
+        # 用预加载的embeddings包装模型，避免TTE/STS任务重复计算GNN前向传播
+        device = self.config.get('device', torch.device('cpu'))
+        emb_wrapped = PreloadedEmbeddingWrapper(emb, emb_vec, device)
+        self._logger.info('[OPTIMIZATION] Using PreloadedEmbeddingWrapper to speed up TTE/STS tasks')
+        # === END OPTIMIZATION ===
+
         # 加载已完成的结果（如果有）
         self._load_completed_results()
 
@@ -465,9 +472,11 @@ class HHGCLEvaluator(AbstractEvaluator):
                     result = downstream_model.run(emb_vec, label)
                 if task in ["tte"]:
                     label = self.data_label[task]
-                    result = downstream_model.run(emb, label, **kwargs)
+                    # 使用包装后的模型，避免重复GNN计算
+                    result = downstream_model.run(emb_wrapped, label, **kwargs)
                 elif task in ['sts']:
-                    result = downstream_model.run(emb,**kwargs)
+                    # 使用包装后的模型，避免重复GNN计算
+                    result = downstream_model.run(emb_wrapped,**kwargs)
                 self.result.update(add_prefix_to_keys(result, task + '_'))
             if 'tte_best epoch' in self.result.keys():
                 del self.result['tte_best epoch']
