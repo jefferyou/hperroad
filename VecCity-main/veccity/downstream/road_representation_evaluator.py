@@ -107,6 +107,10 @@ class RoadRepresentationEvaluator(AbstractEvaluator):
             return new_dictionary
         
         def dict_to_csv(dictionary, filename):
+            # Ensure directory exists before writing file
+            import os
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+
             with open(filename, 'w', newline='') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=dictionary.keys())
                 writer.writeheader()
