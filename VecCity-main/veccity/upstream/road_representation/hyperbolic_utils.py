@@ -1,12 +1,17 @@
 """
 Hyperbolic Utilities for Lorentz Model
 基于HyCoCLIP的双曲空间操作工具
+优化版本：应用数值稳定性和性能优化
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from .hyperbolic_optimizations import (
+    cosh, sinh, tanh, Arcosh, Artanh, AdaptiveEpsilon,
+    lorentz_distance_with_clipping
+)
 
 
 class LorentzManifold:
@@ -17,8 +22,9 @@ class LorentzManifold:
     """
 
     def __init__(self, eps=1e-7):
-        self.eps = eps
+        self.eps = eps  # 保留基础 eps，但会在需要时使用自适应值
         self.min_norm = 1e-15
+        self.max_dist = 50.0  # 最大距离截断，防止 NaN
 
     def minkowski_dot(self, x, y, keepdim=True):
         """
@@ -35,18 +41,22 @@ class LorentzManifold:
 
     def lorentz_distance(self, x, y):
         """
-        计算Lorentz距离
+        计算Lorentz距离（优化版本：带截断和自定义acosh）
         d(x,y) = arcosh(-<x,y>)
         """
         prod = self.minkowski_dot(x, y, keepdim=False)
         # 为数值稳定性，限制prod的范围
-        prod = torch.clamp(prod, max=-1.0 - self.eps)
+        eps = AdaptiveEpsilon.get_eps(x)
+        prod = torch.clamp(prod, max=-1.0 - eps)
 
-        # acosh requires input >= 1.0, use strict clamping for numerical stability
+        # acosh requires input >= 1.0, use strict clamping
         acosh_input = -prod
         acosh_input = torch.clamp(acosh_input, min=1.0 + 1e-6)
 
-        dist = torch.acosh(acosh_input)
+        # 使用自定义 acosh，带最大距离截断
+        dist = Arcosh.apply(acosh_input)
+        dist = torch.clamp(dist, max=self.max_dist)
+
         return dist
 
     def project_to_lorentz(self, x, k=1.0):
@@ -71,7 +81,7 @@ class LorentzManifold:
 
     def exp_map(self, x, v):
         """
-        指数映射: exp_x(v)
+        指数映射: exp_x(v) (优化版本：使用包装的双曲函数)
         将切空间向量v从点x映射到流形上
 
         Args:
@@ -81,13 +91,15 @@ class LorentzManifold:
             y: shape [..., d+1] 流形上的新点
         """
         # 计算v的Lorentz范数
+        min_norm = AdaptiveEpsilon.get_min_norm(v)
         v_norm = torch.sqrt(torch.clamp(
             self.minkowski_dot(v, v, keepdim=True),
-            min=self.min_norm
+            min=min_norm
         ))
 
         # exp_x(v) = cosh(||v||)*x + sinh(||v||)*v/||v||
-        y = torch.cosh(v_norm) * x + torch.sinh(v_norm) * v / v_norm
+        # 使用包装的 cosh/sinh 防止溢出
+        y = cosh(v_norm) * x + sinh(v_norm) * v / v_norm
         return y
 
     def log_map(self, x, y):
@@ -103,15 +115,17 @@ class LorentzManifold:
         """
         # 计算内积
         xy = self.minkowski_dot(x, y, keepdim=True)
-        xy = torch.clamp(xy, max=-1.0 - self.eps)
+        eps = AdaptiveEpsilon.get_eps(x)
+        xy = torch.clamp(xy, max=-1.0 - eps)
 
         # 计算距离 - acosh requires input >= 1.0
         acosh_input = -xy
         acosh_input = torch.clamp(acosh_input, min=1.0 + 1e-6)
-        dist = torch.acosh(acosh_input)
+        dist = Arcosh.apply(acosh_input)
 
         # log_x(y) = dist * (y + <x,y>*x) / ||y + <x,y>*x||
-        coef = dist / torch.sinh(dist + self.eps)
+        # 使用包装的 sinh 防止溢出
+        coef = dist / (sinh(dist) + eps)
         v = coef * (y + xy * x)
         return v
 
@@ -208,7 +222,9 @@ class EntailmentCone:
 
         # 半孔径角度随距离增加而减小
         # theta = 2 * arcsin(1 / cosh(dist))
-        theta = 2 * torch.arcsin(1.0 / torch.cosh(dist + self.eps))
+        # 使用包装的 cosh 防止溢出
+        cosh_val = cosh(dist + self.eps)
+        theta = 2 * torch.arcsin(torch.clamp(1.0 / cosh_val, max=1.0 - 1e-7))
         return theta
 
     def angle_between(self, x, y):

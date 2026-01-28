@@ -18,6 +18,9 @@ from veccity.upstream.abstract_replearning_model import AbstractReprLearningMode
 from veccity.upstream.road_representation.hyperbolic_utils import (
     LorentzManifold, HyperbolicEmbedding, EntailmentCone, HyperbolicGraphConv
 )
+from veccity.upstream.road_representation.hyperbolic_optimizations import (
+    Arcosh, AdaptiveEpsilon
+)
 import pdb
 
 
@@ -267,13 +270,17 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         """
         # Minkowski内积
         prod = torch.sum(x * y, dim=-1) - 2 * x[:, 0] * y[:, 0]
-        # 数值稳定性
-        prod = torch.clamp(prod, max=-1.0 - self.manifold.eps)
+        # 数值稳定性（使用自适应epsilon）
+        eps = AdaptiveEpsilon.get_eps(x)
+        prod = torch.clamp(prod, max=-1.0 - eps)
 
         # acosh requires input >= 1.0
         acosh_input = -prod
         acosh_input = torch.clamp(acosh_input, min=1.0 + 1e-6)
-        dist = torch.acosh(acosh_input)
+
+        # 使用自定义acosh + 距离截断
+        dist = Arcosh.apply(acosh_input)
+        dist = torch.clamp(dist, max=self.manifold.max_dist)
         return dist
 
     def _batch_lorentz_distance_pairwise(self, x, y):
@@ -287,13 +294,17 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         """
         # Minkowski内积
         prod = torch.sum(x * y, dim=-1) - 2 * x[:, :, 0] * y[:, :, 0]
-        # 数值稳定性
-        prod = torch.clamp(prod, max=-1.0 - self.manifold.eps)
+        # 数值稳定性（使用自适应epsilon）
+        eps = AdaptiveEpsilon.get_eps(x)
+        prod = torch.clamp(prod, max=-1.0 - eps)
 
         # acosh requires input >= 1.0
         acosh_input = -prod
         acosh_input = torch.clamp(acosh_input, min=1.0 + 1e-6)
-        dist = torch.acosh(acosh_input)
+
+        # 使用自定义acosh + 距离截断
+        dist = Arcosh.apply(acosh_input)
+        dist = torch.clamp(dist, max=self.manifold.max_dist)
         return dist
 
     def run(self, train_dataloader, eval_dataloader):
@@ -685,13 +696,17 @@ class HyperbolicGraphEncoderTLCore(Module):
         minkowski_prod = spatial_prod - temporal_prod  # [N, N]
 
         # 计算距离: d(x,y) = arcosh(-<x,y>)
-        # 数值稳定性：限制prod的范围
-        minkowski_prod = torch.clamp(minkowski_prod, max=-1.0 - self.manifold.eps)
+        # 数值稳定性：限制prod的范围（使用自适应epsilon）
+        eps = AdaptiveEpsilon.get_eps(embeddings)
+        minkowski_prod = torch.clamp(minkowski_prod, max=-1.0 - eps)
 
         # acosh requires input >= 1.0
         acosh_input = -minkowski_prod
         acosh_input = torch.clamp(acosh_input, min=1.0 + 1e-6)
-        dist_matrix = torch.acosh(acosh_input)  # [N, N]
+
+        # 使用自定义acosh + 距离截断
+        dist_matrix = Arcosh.apply(acosh_input)  # [N, N]
+        dist_matrix = torch.clamp(dist_matrix, max=self.manifold.max_dist)
 
         # 计算亲和度: exp(-距离)
         affinity = torch.exp(-dist_matrix)
