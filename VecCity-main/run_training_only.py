@@ -101,18 +101,18 @@ def run_training_only(args):
     dataset = get_dataset(config)
     train_data, valid_data, test_data = dataset.get_data()
     data_feature = dataset.get_data_feature()
-    logger.info(f"✅ Dataset loaded")
+    logger.info(f"[OK] Dataset loaded")
 
     # 创建模型
     logger.info("Creating model...")
     model = get_model(config, data_feature)
     total_num = sum([param.nelement() for param in model.parameters()])
-    logger.info(f'✅ Model created: {total_num:,} parameters')
+    logger.info(f'[OK] Model created: {total_num:,} parameters')
 
     # 创建executor
     logger.info("Creating executor...")
     executor = get_executor(config, model, data_feature)
-    logger.info(f"✅ Executor created: {type(executor).__name__}")
+    logger.info(f"[OK] Executor created: {type(executor).__name__}")
 
     # 创建缓存目录
     model_cache_file = f'./veccity/cache/{exp_id}/model_cache/{args.model}_{args.dataset}.m'
@@ -127,14 +127,14 @@ def run_training_only(args):
         executor.train(train_data, valid_data)
 
         logger.info("="*80)
-        logger.info("✅ Training completed successfully!")
+        logger.info("[OK] Training completed successfully!")
         logger.info("="*80)
 
         # 保存模型
         if args.saved_model:
             logger.info(f"Saving model to {model_cache_file}...")
             executor.save_model(model_cache_file)
-            logger.info(f"✅ Model saved")
+            logger.info(f"[OK] Model saved")
 
         # 检查embeddings是否已生成
         embedding_path = f'./veccity/cache/{exp_id}/evaluate_cache/road_embedding_{args.model}_{args.dataset}_*.npy'
@@ -149,7 +149,7 @@ def run_training_only(args):
         logger.info("="*80)
 
     except Exception as e:
-        logger.error(f"❌ Error during training: {str(e)}")
+        logger.error(f"[ERROR] Error during training: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
         sys.exit(1)
@@ -160,7 +160,7 @@ def main():
     args = parse_args()
 
     print("\n" + "="*80)
-    print("🚀 Model Training Script (Training Only, No Evaluation)")
+    print("*** Model Training Script (Training Only, No Evaluation)")
     print("="*80)
     print(f"Task: {args.task}")
     print(f"Model: {args.model}")

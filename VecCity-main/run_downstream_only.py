@@ -118,18 +118,18 @@ def run_downstream_evaluation(args):
         embedding_path = f'./veccity/cache/{exp_id}/evaluate_cache/road_embedding_{args.model}_{args.dataset}_{args.output_dim}.npy'
 
         if not os.path.exists(embedding_path):
-            print(f"❌ Embedding file not found: {embedding_path}")
+            print(f"[ERROR] Embedding file not found: {embedding_path}")
             print(f"Looking for existing embeddings...")
             embedding_path, exp_id = find_embedding_file(
                 './veccity/cache/', args.model, args.dataset, args.output_dim
             )
-            print(f"✅ Found embedding: {embedding_path}")
+            print(f"[OK] Found embedding: {embedding_path}")
     else:
-        print(f"🔍 Auto-detecting embedding file...")
+        print(f"[Search] Auto-detecting embedding file...")
         embedding_path, exp_id = find_embedding_file(
             './veccity/cache/', args.model, args.dataset, args.output_dim
         )
-        print(f"✅ Found embedding: {embedding_path}")
+        print(f"[OK] Found embedding: {embedding_path}")
 
     other_args['exp_id'] = exp_id
 
@@ -163,18 +163,18 @@ def run_downstream_evaluation(args):
     # 加载embedding文件
     logger.info(f"Loading embeddings from {embedding_path}...")
     embeddings = np.load(embedding_path)
-    logger.info(f"✅ Embeddings loaded: shape={embeddings.shape}, dtype={embeddings.dtype}")
+    logger.info(f"[OK] Embeddings loaded: shape={embeddings.shape}, dtype={embeddings.dtype}")
 
     # 加载数据集（仅用于获取标签数据）
     logger.info("Loading dataset for labels...")
     dataset = get_dataset(config)
     data_feature = dataset.get_data_feature()
-    logger.info(f"✅ Dataset loaded")
+    logger.info(f"[OK] Dataset loaded")
 
     # 创建评估器
     logger.info("Creating evaluator...")
     evaluator = get_evaluator(config, data_feature)
-    logger.info(f"✅ Evaluator created: {type(evaluator).__name__}")
+    logger.info(f"[OK] Evaluator created: {type(evaluator).__name__}")
 
     # 确保输出目录存在
     evaluate_res_dir = f'./veccity/cache/{exp_id}/evaluate_cache'
@@ -191,12 +191,12 @@ def run_downstream_evaluation(args):
         evaluator.evaluate()
 
         logger.info("="*80)
-        logger.info("✅ Downstream evaluation completed successfully!")
+        logger.info("[OK] Downstream evaluation completed successfully!")
         logger.info(f"Results saved to: {evaluate_res_dir}")
         logger.info("="*80)
 
     except Exception as e:
-        logger.error(f"❌ Error during evaluation: {str(e)}")
+        logger.error(f"[ERROR] Error during evaluation: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
         sys.exit(1)
@@ -207,7 +207,7 @@ def main():
     args = parse_args()
 
     print("\n" + "="*80)
-    print("🚀 Downstream Tasks Evaluation Script")
+    print("*** Downstream Tasks Evaluation Script")
     print("="*80)
     print(f"Task: {args.task}")
     print(f"Model: {args.model}")

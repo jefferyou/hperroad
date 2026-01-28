@@ -69,12 +69,12 @@
         "HRNR":{
             "dataset_class": "HRNRDataset",
             "executor": "TwoStepExecutor",
-            "evaluator": "HHGCLEvaluator"
+            "evaluator": "RoadRepresentationEvaluator"
         },
         "HRNR_Hyperbolic":{
             "dataset_class": "HRNRDataset",
             "executor": "TwoStepExecutor",
-            "evaluator": "HHGCLEvaluator"
+            "evaluator": "RoadRepresentationEvaluator"
         },
         "TrajRNE":{
             "dataset_class": "TrajRNEDataset",
