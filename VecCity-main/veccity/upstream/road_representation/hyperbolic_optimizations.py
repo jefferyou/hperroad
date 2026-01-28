@@ -91,9 +91,10 @@ class Acos(torch.autograd.Function):
     """
     @staticmethod
     def forward(ctx, x):
-        # 严格边界保护：acos 定义域为 [-1, 1]
-        # 使用更大的margin避免导数爆炸
-        x = x.clamp(min=-0.9999, max=0.9999)
+        # 边界保护：acos 定义域为 [-1, 1]
+        # 关键修复：使用与原始代码一致的margin (1e-5)，避免过度截断
+        # 之前使用1e-4 (0.9999)会导致cd数据集梯度消失，因为层次结构中cos_angle经常接近±1
+        x = x.clamp(min=-1.0 + 1e-5, max=1.0 - 1e-5)
         ctx.save_for_backward(x)
 
         # 提升精度计算
@@ -105,11 +106,13 @@ class Acos(torch.autograd.Function):
     def backward(ctx, grad_output):
         x, = ctx.saved_tensors
         # 导数：-1 / sqrt(1 - x^2)
-        # 在边界附近截断导数避免爆炸
+        # 在边界附近截断导数避免爆炸，但保留有效梯度
         denominator = torch.sqrt(1.0 - x * x + 1e-8)
-        # 截断梯度幅度
         grad = -grad_output / denominator
-        grad = torch.clamp(grad, min=-10.0, max=10.0)  # 限制梯度幅度
+
+        # 梯度幅度限制：使用更大的阈值，避免过度抑制学习
+        # 之前的10.0对于层次结构学习来说过于保守，导致cd数据集梯度消失
+        grad = torch.clamp(grad, min=-50.0, max=50.0)
         return grad
 
 
