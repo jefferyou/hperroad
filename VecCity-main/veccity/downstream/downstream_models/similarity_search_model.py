@@ -55,18 +55,24 @@ def build_graph(rel_file, geo_file):
 class TrajEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, n_layers, embedding, device):
         super().__init__()
-        self.input_dim = input_dim
+        # 获取实际的embedding维度（支持EmbeddingWrapper和numpy数组）
+        if hasattr(embedding, 'shape'):
+            actual_embed_dim = embedding.shape[1] if len(embedding.shape) > 1 else embedding.shape[0]
+        else:
+            actual_embed_dim = input_dim
+
+        self.input_dim = actual_embed_dim  # 使用实际维度而不是配置中的维度
         self.hidden_dim = hidden_dim
         self.embedding = embedding
         self.n_layers = n_layers
         self.device = device
-        self.lstm = nn.LSTM(input_dim, hidden_dim, n_layers, dropout=0.1 if n_layers > 1 else 0.0, batch_first=True)
+        self.lstm = nn.LSTM(actual_embed_dim, hidden_dim, n_layers, dropout=0.1 if n_layers > 1 else 0.0, batch_first=True)
 
     def forward(self, batch):
         path=batch['seq'][:,:,0]
         # valid_len=batch['lengths']
         padding_masks=batch['padding_masks']
-        
+
         # original_shape = path.shape  # [batch_size, traj_len]
         # full_embed = [torch.from_numpy(self.embedding[int(i)]).to(torch.float32) for i in path.reshape(-1)]
         # full_embed = torch.stack(full_embed)
@@ -88,11 +94,15 @@ class TrajEncoder(nn.Module):
 class STSModel(nn.Module):
     def __init__(self, embedding,device,input_size=128,dropout_prob=0.2):
         super().__init__()
-        
+
         self.traj_encoder = TrajEncoder(input_size,input_size,1,embedding,device)
+
+        # 使用TrajEncoder的实际input_dim（可能与配置中的不同）
+        actual_input_size = self.traj_encoder.input_dim
+
         self.criterion = torch.nn.CrossEntropyLoss(reduction='mean')
         # self.criterion = torch.nn.BCEWithLogitsLoss(reduction='mean')
-        self.projection=nn.Sequential(nn.Linear(input_size,input_size),nn.ReLU(),nn.Linear(input_size,input_size))
+        self.projection=nn.Sequential(nn.Linear(actual_input_size,actual_input_size),nn.ReLU(),nn.Linear(actual_input_size,actual_input_size))
         self.device=device
         self.temperature=0.05
         

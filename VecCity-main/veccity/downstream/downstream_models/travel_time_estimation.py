@@ -12,15 +12,21 @@ import random
 class TrajEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, n_layers, embedding, device):
         super().__init__()
-        self.input_dim = input_dim
+        # 获取实际的embedding维度（支持EmbeddingWrapper和numpy数组）
+        if hasattr(embedding, 'shape'):
+            actual_embed_dim = embedding.shape[1] if len(embedding.shape) > 1 else embedding.shape[0]
+        else:
+            actual_embed_dim = input_dim
+
+        self.input_dim = actual_embed_dim  # 使用实际维度而不是配置中的维度
         self.hidden_dim = hidden_dim
         self.embedding = embedding
         self.n_layers = n_layers
         self.device = device
-        self.lstm = nn.LSTM(input_dim, hidden_dim, n_layers, dropout=0.1 if n_layers > 1 else 0.0, batch_first=True)
+        self.lstm = nn.LSTM(actual_embed_dim, hidden_dim, n_layers, dropout=0.1 if n_layers > 1 else 0.0, batch_first=True)
 
     def forward(self, path, valid_len):
-        
+
         original_shape = path.shape  # [batch_size, traj_len]
         full_embed = self.embedding.encode(path)
         full_embed = full_embed.view(*original_shape, self.input_dim)  # [batch_size, traj_len, embed_size]
@@ -28,7 +34,7 @@ class TrajEncoder(nn.Module):
         h0 = torch.zeros(self.n_layers, full_embed.size(0), self.hidden_dim).to(self.device)
         c0 = torch.zeros(self.n_layers, full_embed.size(0), self.hidden_dim).to(self.device)
         _, out = self.lstm(pack_x, (h0, c0))
-        
+
         return out[0][0]
 
 
@@ -41,9 +47,12 @@ class MLPReg(nn.Module):
 
         self.embedding = embedding
         self.lstm = TrajEncoder(input_dim, input_dim, 1, embedding, device)
-        
+
+        # 使用TrajEncoder的实际input_dim（可能与配置中的不同）
+        actual_input_dim = self.lstm.input_dim
+
         self.layers = []
-        self.layers.append(nn.Linear(input_dim, hidden_dim))
+        self.layers.append(nn.Linear(actual_input_dim, hidden_dim))
         for _ in range(self.num_layers - 2):
             self.layers.append(nn.Linear(hidden_dim, hidden_dim))
         self.layers.append(nn.Linear(hidden_dim, 1))
