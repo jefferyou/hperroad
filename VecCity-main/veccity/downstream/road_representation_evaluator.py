@@ -3,9 +3,11 @@ import importlib
 import json
 import numpy as np
 import pandas as pd
+import os
 from logging import getLogger
 from veccity.downstream.abstract_evaluator import AbstractEvaluator
 from veccity.downstream.embedding_wrapper import EmbeddingWrapper
+from veccity.downstream.utils import generate_road_representaion_downstream_data
 
 
 class RoadRepresentationEvaluator(AbstractEvaluator):
@@ -27,6 +29,50 @@ class RoadRepresentationEvaluator(AbstractEvaluator):
             .format(self.exp_id, self.model, self.dataset, self.output_dim)
         self.result_path = './veccity/cache/{}/evaluate_cache/result_{}_{}_{}.json' \
             .format(self.exp_id, self.model, self.dataset, self.output_dim)
+
+        # 加载标签数据（与HHGCLEvaluator类似）
+        self.label_data_path = os.path.join('veccity', 'cache', 'dataset_cache', self.dataset, 'label_data')
+        self._load_label_data()
+
+    def _load_label_data(self):
+        """加载下游任务的标签数据"""
+        # 确保标签数据文件存在
+        data_path1 = os.path.join("veccity/cache/dataset_cache", self.dataset, "label_data", "avg_speeds.csv")
+        data_path2 = os.path.join("veccity/cache/dataset_cache", self.dataset, "label_data", "time.csv")
+
+        if not os.path.exists(data_path1) or not os.path.exists(data_path2):
+            self._logger.info(f"Label data not found, generating...")
+            generate_road_representaion_downstream_data(self.dataset)
+
+        # 加载speed inference标签
+        speed_label = pd.read_csv(os.path.join(self.label_data_path, "avg_speeds.csv"))
+        speed_label.sort_values(by="index", inplace=True, ascending=True)
+
+        # 加载travel time estimation标签
+        min_len, max_len = self.config.get("tte_min_len", 1), self.config.get("tte_max_len", 100)
+        time_label = pd.read_csv(os.path.join(self.label_data_path, "time.csv"))
+        time_label['path'] = time_label['trajs'].map(eval)
+        time_label['path_len'] = time_label['path'].map(len)
+        time_label = time_label.loc[
+            (time_label['path_len'] > min_len) & (time_label['path_len'] < max_len)
+        ]
+
+        # 获取节点数量
+        num_nodes = self.data_feature.get('num_nodes', len(speed_label))
+
+        # 构建与HHGCLEvaluator兼容的标签结构
+        if "label" not in self.data_feature:
+            self.data_feature["label"] = {}
+
+        self.data_feature["label"]["speed_inference"] = {
+            'speed': speed_label
+        }
+        self.data_feature["label"]["travel_time_estimation"] = {
+            'time': time_label,
+            'padding_id': num_nodes
+        }
+
+        self._logger.info(f"Label data loaded: speed_inference={len(speed_label)}, travel_time_estimation={len(time_label)}")
 
     def get_downstream_model(self, model):
         try:
