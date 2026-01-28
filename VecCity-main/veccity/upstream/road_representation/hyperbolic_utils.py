@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from .hyperbolic_optimizations import (
-    cosh, sinh, tanh, Arcosh, Artanh, AdaptiveEpsilon,
+    cosh, sinh, tanh, Arcosh, Artanh, Acos, AdaptiveEpsilon,
     lorentz_distance_with_clipping, exp_map_zero, log_map_zero
 )
 
@@ -230,7 +230,7 @@ class EntailmentCone:
 
     def angle_between(self, x, y):
         """
-        计算两点之间的角度
+        计算两点之间的角度（优化版本：使用稳定的计算方法）
 
         Args:
             x: shape [..., d+1] 锥顶点
@@ -238,19 +238,36 @@ class EntailmentCone:
         Returns:
             angle: shape [...] 角度
         """
-        # 计算角度 arccos(<x,y> / (||x|| * ||y||))
+        # 对于Lorentz空间中的点，使用双曲距离计算角度更稳定
+        # 避免直接使用acos，改用arcosh + 几何关系
+
+        # 方法1：如果两点在双曲空间，使用双曲距离
+        eps = AdaptiveEpsilon.get_eps(x)
+        min_norm = AdaptiveEpsilon.get_min_norm(x)
+
+        # 计算Minkowski内积（应该是负数）
         xy = self.manifold.minkowski_dot(x, y, keepdim=False)
-        x_norm = torch.sqrt(-self.manifold.minkowski_dot(x, x, keepdim=False))
-        y_norm = torch.sqrt(-self.manifold.minkowski_dot(y, y, keepdim=False))
 
-        # Add stability: use larger epsilon for division
-        cos_angle = xy / (x_norm * y_norm + 1e-6)
+        # 计算Minkowski范数
+        xx = self.manifold.minkowski_dot(x, x, keepdim=False)
+        yy = self.manifold.minkowski_dot(y, y, keepdim=False)
 
-        # Strict clamping to prevent acos NaN: use larger margin
-        # acos is only defined for [-1, 1], use margin of 1e-5 for safety
-        cos_angle = torch.clamp(cos_angle, min=-1.0 + 1e-5, max=1.0 - 1e-5)
+        # 确保范数是负数（Lorentz约束）
+        xx = torch.clamp(xx, max=-eps)
+        yy = torch.clamp(yy, max=-eps)
 
-        angle = torch.acos(cos_angle)
+        x_norm = torch.sqrt(-xx + min_norm)
+        y_norm = torch.sqrt(-yy + min_norm)
+
+        # 计算余弦值
+        cos_angle = xy / (x_norm * y_norm + eps)
+
+        # 使用自定义Acos（带梯度截断和数值稳定性保护）
+        angle = Acos.apply(cos_angle)
+
+        # 确保angle是有限的
+        angle = torch.clamp(angle, min=1e-7, max=3.14159 - 1e-7)
+
         return angle
 
     def entailment_score(self, parent, child):

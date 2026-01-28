@@ -84,6 +84,35 @@ class Arcosh(torch.autograd.Function):
         return grad_output / torch.sqrt(x * x - 1.0 + 1e-15)
 
 
+class Acos(torch.autograd.Function):
+    """
+    自定义 acos 函数，提升数值稳定性
+    acos的导数在边界附近趋于无穷，需要特别小心
+    """
+    @staticmethod
+    def forward(ctx, x):
+        # 严格边界保护：acos 定义域为 [-1, 1]
+        # 使用更大的margin避免导数爆炸
+        x = x.clamp(min=-0.9999, max=0.9999)
+        ctx.save_for_backward(x)
+
+        # 提升精度计算
+        z = x.double()
+        result = torch.acos(z)
+        return result.to(x.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, = ctx.saved_tensors
+        # 导数：-1 / sqrt(1 - x^2)
+        # 在边界附近截断导数避免爆炸
+        denominator = torch.sqrt(1.0 - x * x + 1e-8)
+        # 截断梯度幅度
+        grad = -grad_output / denominator
+        grad = torch.clamp(grad, min=-10.0, max=10.0)  # 限制梯度幅度
+        return grad
+
+
 # ============================================================================
 # 3. 自适应精度管理
 # ============================================================================
