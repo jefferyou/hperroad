@@ -152,7 +152,7 @@ class TravelTimeEstimationModel(AbstractModel):
 
         # Add learning rate scheduler for better convergence
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            opt, mode='min', factor=0.5, patience=5, verbose=True
+            opt, mode='min', factor=0.5, patience=5
         )
 
         loss_fn = nn.MSELoss()
