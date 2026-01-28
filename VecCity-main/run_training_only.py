@@ -78,8 +78,8 @@ def run_training_only(args):
     # 加载配置
     config = ConfigParser(
         task=args.task,
-        model_name=args.model,
-        dataset_name=args.dataset,
+        model=args.model,
+        dataset=args.dataset,
         config_file=args.config_file,
         saved_model=args.saved_model,
         train=True,
