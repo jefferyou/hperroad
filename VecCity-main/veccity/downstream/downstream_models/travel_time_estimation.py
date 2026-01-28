@@ -48,11 +48,12 @@ class MLPReg(nn.Module):
         self.embedding = embedding
         self.lstm = TrajEncoder(input_dim, input_dim, 1, embedding, device)
 
-        # 使用TrajEncoder的实际input_dim（可能与配置中的不同）
-        actual_input_dim = self.lstm.input_dim
+        # MLPReg的输入是LSTM的输出维度（hidden_dim），而不是embedding维度
+        # TrajEncoder的输出维度是它的hidden_dim参数
+        lstm_output_dim = self.lstm.hidden_dim  # LSTM输出维度（128），不是embedding维度（225）
 
         self.layers = []
-        self.layers.append(nn.Linear(actual_input_dim, hidden_dim))
+        self.layers.append(nn.Linear(lstm_output_dim, hidden_dim))
         for _ in range(self.num_layers - 2):
             self.layers.append(nn.Linear(hidden_dim, hidden_dim))
         self.layers.append(nn.Linear(hidden_dim, 1))

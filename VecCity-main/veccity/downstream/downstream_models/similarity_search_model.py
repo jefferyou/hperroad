@@ -97,12 +97,13 @@ class STSModel(nn.Module):
 
         self.traj_encoder = TrajEncoder(input_size,input_size,1,embedding,device)
 
-        # 使用TrajEncoder的实际input_dim（可能与配置中的不同）
-        actual_input_size = self.traj_encoder.input_dim
+        # projection层的输入是TrajEncoder的输出维度（hidden_dim），而不是embedding维度
+        # TrajEncoder的输出维度是它的hidden_dim参数
+        encoder_output_dim = self.traj_encoder.hidden_dim  # LSTM输出维度（128），不是embedding维度（225）
 
         self.criterion = torch.nn.CrossEntropyLoss(reduction='mean')
         # self.criterion = torch.nn.BCEWithLogitsLoss(reduction='mean')
-        self.projection=nn.Sequential(nn.Linear(actual_input_size,actual_input_size),nn.ReLU(),nn.Linear(actual_input_size,actual_input_size))
+        self.projection=nn.Sequential(nn.Linear(encoder_output_dim,encoder_output_dim),nn.ReLU(),nn.Linear(encoder_output_dim,encoder_output_dim))
         self.device=device
         self.temperature=0.05
         
