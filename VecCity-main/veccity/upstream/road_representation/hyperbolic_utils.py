@@ -41,7 +41,12 @@ class LorentzManifold:
         prod = self.minkowski_dot(x, y, keepdim=False)
         # 为数值稳定性，限制prod的范围
         prod = torch.clamp(prod, max=-1.0 - self.eps)
-        dist = torch.acosh(-prod + self.eps)
+
+        # acosh requires input >= 1.0, use strict clamping for numerical stability
+        acosh_input = -prod
+        acosh_input = torch.clamp(acosh_input, min=1.0 + 1e-6)
+
+        dist = torch.acosh(acosh_input)
         return dist
 
     def project_to_lorentz(self, x, k=1.0):
@@ -100,8 +105,10 @@ class LorentzManifold:
         xy = self.minkowski_dot(x, y, keepdim=True)
         xy = torch.clamp(xy, max=-1.0 - self.eps)
 
-        # 计算距离
-        dist = torch.acosh(-xy + self.eps)
+        # 计算距离 - acosh requires input >= 1.0
+        acosh_input = -xy
+        acosh_input = torch.clamp(acosh_input, min=1.0 + 1e-6)
+        dist = torch.acosh(acosh_input)
 
         # log_x(y) = dist * (y + <x,y>*x) / ||y + <x,y>*x||
         coef = dist / torch.sinh(dist + self.eps)
@@ -219,8 +226,13 @@ class EntailmentCone:
         x_norm = torch.sqrt(-self.manifold.minkowski_dot(x, x, keepdim=False))
         y_norm = torch.sqrt(-self.manifold.minkowski_dot(y, y, keepdim=False))
 
-        cos_angle = xy / (x_norm * y_norm + self.eps)
-        cos_angle = torch.clamp(cos_angle, -1.0 + self.eps, 1.0 - self.eps)
+        # Add stability: use larger epsilon for division
+        cos_angle = xy / (x_norm * y_norm + 1e-6)
+
+        # Strict clamping to prevent acos NaN: use larger margin
+        # acos is only defined for [-1, 1], use margin of 1e-5 for safety
+        cos_angle = torch.clamp(cos_angle, min=-1.0 + 1e-5, max=1.0 - 1e-5)
+
         angle = torch.acos(cos_angle)
         return angle
 

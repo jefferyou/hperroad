@@ -269,7 +269,11 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         prod = torch.sum(x * y, dim=-1) - 2 * x[:, 0] * y[:, 0]
         # 数值稳定性
         prod = torch.clamp(prod, max=-1.0 - self.manifold.eps)
-        dist = torch.acosh(-prod + self.manifold.eps)
+
+        # acosh requires input >= 1.0
+        acosh_input = -prod
+        acosh_input = torch.clamp(acosh_input, min=1.0 + 1e-6)
+        dist = torch.acosh(acosh_input)
         return dist
 
     def _batch_lorentz_distance_pairwise(self, x, y):
@@ -285,7 +289,11 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         prod = torch.sum(x * y, dim=-1) - 2 * x[:, :, 0] * y[:, :, 0]
         # 数值稳定性
         prod = torch.clamp(prod, max=-1.0 - self.manifold.eps)
-        dist = torch.acosh(-prod + self.manifold.eps)
+
+        # acosh requires input >= 1.0
+        acosh_input = -prod
+        acosh_input = torch.clamp(acosh_input, min=1.0 + 1e-6)
+        dist = torch.acosh(acosh_input)
         return dist
 
     def run(self, train_dataloader, eval_dataloader):
@@ -679,7 +687,11 @@ class HyperbolicGraphEncoderTLCore(Module):
         # 计算距离: d(x,y) = arcosh(-<x,y>)
         # 数值稳定性：限制prod的范围
         minkowski_prod = torch.clamp(minkowski_prod, max=-1.0 - self.manifold.eps)
-        dist_matrix = torch.acosh(-minkowski_prod + self.manifold.eps)  # [N, N]
+
+        # acosh requires input >= 1.0
+        acosh_input = -minkowski_prod
+        acosh_input = torch.clamp(acosh_input, min=1.0 + 1e-6)
+        dist_matrix = torch.acosh(acosh_input)  # [N, N]
 
         # 计算亲和度: exp(-距离)
         affinity = torch.exp(-dist_matrix)
