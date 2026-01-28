@@ -15,8 +15,8 @@ class RoadRepresentationEvaluator(AbstractEvaluator):
     def __init__(self, config, data_feature):
         self._logger = getLogger()
         self.config = config
-        self.evaluate_tasks = self.config.get('evaluate_task', ["speed_inference", "travel_time_estimation"])
-        self.evaluate_model = self.config.get('evaluate_model', ["SpeedInferenceModel", "TravelTimeEstimationModel"])
+        self.evaluate_tasks = self.config.get('evaluate_task', ["speed_inference", "travel_time_estimation", "similarity_search"])
+        self.evaluate_model = self.config.get('evaluate_model', ["SpeedInferenceModel", "TravelTimeEstimationModel", "SimilaritySearchModel"])
         self.result = {}
         self.model = config.get('model', '')
         self.dataset = config.get('dataset', '')
@@ -123,10 +123,21 @@ class RoadRepresentationEvaluator(AbstractEvaluator):
         for task, model in zip(self.evaluate_tasks, self.evaluate_model):
             downstream_model = self.get_downstream_model(model)
             x = embedding_wrapper  # 使用wrapper而不是原始numpy数组
-            label = self.data_feature["label"][task]
-            result = downstream_model.run(x, label)
+
+            # SimilaritySearchModel不需要label参数，它自己处理数据加载
+            if model == "SimilaritySearchModel":
+                self._logger.info(f"Running {task} (no label required)...")
+                result = downstream_model.run(x)
+            else:
+                # SpeedInferenceModel和TravelTimeEstimationModel需要label
+                label = self.data_feature["label"][task]
+                result = downstream_model.run(x, label)
+
             self.result.update(add_prefix_to_keys(result, task + '_'))
-        del self.result['travel_time_estimation_best epoch']
+
+        # 移除不需要的best epoch键（如果存在）
+        if 'travel_time_estimation_best epoch' in self.result:
+            del self.result['travel_time_estimation_best epoch']
         print(f'Evaluate result: {self.result}')
         self._logger.info(f'Evaluate result: {self.result}')
         result_path = './raw_data/new/evaluate_cache/{}_evaluate_{}_{}_{}.csv'. \

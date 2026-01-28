@@ -55,8 +55,8 @@ def parse_args():
 
     # 下游任务配置
     parser.add_argument('--evaluate_task', type=str, nargs='+',
-                        default=["speed_inference", "travel_time_estimation"],
-                        help='Downstream tasks to evaluate')
+                        default=["speed_inference", "travel_time_estimation", "similarity_search"],
+                        help='Downstream tasks to evaluate (speed_inference, travel_time_estimation, similarity_search)')
 
     return parser.parse_args()
 
