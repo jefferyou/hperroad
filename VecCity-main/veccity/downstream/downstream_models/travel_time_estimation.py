@@ -118,17 +118,22 @@ class TravelTimeEstimationModel(AbstractModel):
         lens_arr = torch.Tensor(lens_arr).long()
         y_arr = torch.Tensor(y_arr)
 
+        # Normalize travel time for better training stability
+        y_mean = y_arr.mean()
+        y_std = y_arr.std()
+        y_arr_normalized = (y_arr - y_mean) / (y_std + 1e-8)
+
         device=self.config.get('device','cpu')
         input_dim=self.config.get('embed_size',128)
         hidden_dim=self.config.get('d_model', 128)
-        max_epoch = self.config.get('task_epoch',100) 
+        max_epoch = self.config.get('task_epoch',100)
         is_static = self.config.get('is_static',True)
         train_size = int(num_samples * 0.6)
         eval_size=int(num_samples * 0.2)
         test_size = num_samples - train_size - eval_size
-        train_data_X ,train_lens,train_data_y = x_arr[:train_size],lens_arr[:train_size],y_arr[:train_size]
-        eval_data_X ,eval_lens, eval_data_y = x_arr[train_size:train_size+eval_size],lens_arr[train_size:train_size+eval_size],y_arr[train_size:train_size+eval_size]
-        test_data_X ,test_lens, test_data_y = x_arr[train_size+eval_size:],lens_arr[train_size+eval_size:],y_arr[train_size+eval_size:]   
+        train_data_X ,train_lens,train_data_y = x_arr[:train_size],lens_arr[:train_size],y_arr_normalized[:train_size]
+        eval_data_X ,eval_lens, eval_data_y = x_arr[train_size:train_size+eval_size],lens_arr[train_size:train_size+eval_size],y_arr_normalized[train_size:train_size+eval_size]
+        test_data_X ,test_lens, test_data_y = x_arr[train_size+eval_size:],lens_arr[train_size+eval_size:],y_arr_normalized[train_size+eval_size:]   
 
         train_dataset = TimeEstimationDataset(train_data_X,train_lens,train_data_y)
         eval_dataset = TimeEstimationDataset(eval_data_X,eval_lens,eval_data_y)
@@ -138,12 +143,23 @@ class TravelTimeEstimationModel(AbstractModel):
         eval_dataloader= DataLoader(eval_dataset,batch_size=128,shuffle=False,num_workers=4)
         test_dataloader= DataLoader(test_dataset,batch_size=128,shuffle=False,num_workers=4)
 
-        
+
         model = MLPReg(input_dim, hidden_dim, 2, nn.ReLU(), embedding_model,is_static,device,max_len).to(device)
 
-        opt = torch.optim.Adam(model.parameters(),lr=1e-4)
-        loss_fn=nn.MSELoss()
+        # Configurable learning rate with default 1e-3 (higher than previous 1e-4)
+        learning_rate = self.config.get('tte_learning_rate', 1e-3)
+        opt = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+        # Add learning rate scheduler for better convergence
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, mode='min', factor=0.5, patience=5, verbose=True
+        )
+
+        loss_fn = nn.MSELoss()
         patience = 10
+
+        # Gradient clipping threshold
+        max_grad_norm = self.config.get('max_grad_norm', 1.0)
 
         best = {"best epoch": 0, "mae": 1e9, "rmse": 1e9}
 
@@ -158,6 +174,10 @@ class TravelTimeEstimationModel(AbstractModel):
                 preds=model(batch_x,batch_lens,**kwargs)
                 loss = loss_fn(preds, batch_y)
                 loss.backward()
+
+                # Gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+
                 opt.step()
 
             model.eval()
@@ -173,9 +193,17 @@ class TravelTimeEstimationModel(AbstractModel):
             y_preds = torch.cat(y_preds, dim=0)
             y_trues = torch.cat(y_trues, dim=0)
 
-            mae = mean_absolute_error(y_trues, y_preds)
-            rmse = mean_squared_error(y_trues, y_preds) ** 0.5
+            # Denormalize predictions for evaluation
+            y_preds_denorm = y_preds * y_std + y_mean
+            y_trues_denorm = y_trues * y_std + y_mean
+
+            mae = mean_absolute_error(y_trues_denorm, y_preds_denorm)
+            rmse = mean_squared_error(y_trues_denorm, y_preds_denorm) ** 0.5
             self._logger.info(f'Epoch: {epoch}, MAE: {mae.item():.4f}, RMSE: {rmse.item():.4f}')
+
+            # Update learning rate based on validation MAE
+            scheduler.step(mae)
+
             # self._writer.add_scalar('ETA Valid MAE', mae, epoch)
             # self._writer.add_scalar('ETA Valid RMSE', rmse, epoch)
             if mae < best["mae"]:
@@ -200,8 +228,13 @@ class TravelTimeEstimationModel(AbstractModel):
         
         y_preds = torch.cat(y_preds, dim=0)
         y_trues = torch.cat(y_trues, dim=0)
-        mae = mean_absolute_error(y_trues, y_preds)
-        rmse = mean_squared_error(y_trues, y_preds) ** 0.5
+
+        # Denormalize predictions for final evaluation
+        y_preds_denorm = y_preds * y_std + y_mean
+        y_trues_denorm = y_trues * y_std + y_mean
+
+        mae = mean_absolute_error(y_trues_denorm, y_preds_denorm)
+        rmse = mean_squared_error(y_trues_denorm, y_preds_denorm) ** 0.5
         best['mae']=mae
         best['rmse']=rmse
         self._logger.info("Test result:epoch {}, MAE:{}, RMSE:{}".format(best['best epoch'], best['mae'], best["rmse"]))
