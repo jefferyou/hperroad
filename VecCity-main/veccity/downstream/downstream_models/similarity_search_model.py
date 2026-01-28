@@ -156,8 +156,19 @@ class SimilaritySearchModel(AbstractModel):
         self.model = STSModel(embedding=model, device=self.device)
         self.model.to(self.device)
         optimizer = Adam(lr=self.learning_rate, params=self.model.parameters(), weight_decay=self.weight_decay)
-        # # 先测试
-        self.evaluation()
+
+        # Baseline 1: Raw embeddings with average pooling (shows true embedding quality)
+        self._logger.info("\n" + "="*80)
+        self._logger.info("Baseline 1: Evaluating RAW HRNR_Hyperbolic embeddings (no LSTM)")
+        self._logger.info("="*80)
+        self.evaluation(use_raw_embeddings=True, **kwargs)
+
+        # Baseline 2: Untrained LSTM (shows performance before fine-tuning)
+        self._logger.info("\n" + "="*80)
+        self._logger.info("Baseline 2: Evaluating with UNTRAINED LSTM encoder")
+        self._logger.info("="*80)
+        self.evaluation(use_raw_embeddings=False, **kwargs)
+
         best_loss=-1
         best_model=None
         best_epoch=0
@@ -193,10 +204,21 @@ class SimilaritySearchModel(AbstractModel):
         if best_model:
             self.model=best_model
 
-        self.evaluation(**kwargs)
+        # Final evaluation: Trained LSTM (shows performance after fine-tuning)
+        self._logger.info("\n" + "="*80)
+        self._logger.info("Final Evaluation: TRAINED LSTM encoder (best model from epoch {})".format(best_epoch))
+        self._logger.info("="*80)
+        self.evaluation(use_raw_embeddings=False, **kwargs)
         return self.result
 
-    def evaluation(self,**kwargs):
+    def evaluation(self, use_raw_embeddings=False, **kwargs):
+        """
+        Evaluate similarity search performance.
+
+        Args:
+            use_raw_embeddings: If True, use raw embeddings with average pooling (no LSTM).
+                              This provides a baseline for embedding quality.
+        """
         ori_dataloader=self.dataset.test_ori_dataloader
         qry_dataloader=self.dataset.test_qry_dataloader
         num_queries=len(self.dataset.test_ori_dataloader)*self.dataset.test_ori_dataloader.batch_size
@@ -206,24 +228,40 @@ class SimilaritySearchModel(AbstractModel):
 
         for batch in ori_dataloader:
             batch.update(kwargs)
-            # seq_rep = self.model.traj_encoder.encode_sequence(batch)
-            seq_rep = self.model(batch)
-            if isinstance(seq_rep, tuple):
-                seq_rep = seq_rep[0]
+            if use_raw_embeddings:
+                # Use raw embeddings with average pooling (no LSTM)
+                path = batch['seq'][:,:,0]
+                padding_masks = batch['padding_masks']
+                full_embed = self.model.traj_encoder.embedding.encode(path)
+                padding_masks = padding_masks.unsqueeze(-1).to(self.device)
+                seq_rep = torch.sum(full_embed * padding_masks, 1) / torch.sum(padding_masks, 1)
+            else:
+                # Use LSTM encoder (may be untrained or trained)
+                seq_rep = self.model(batch)
+                if isinstance(seq_rep, tuple):
+                    seq_rep = seq_rep[0]
             x.append(seq_rep.detach().cpu())
         x = torch.cat(x, dim=0).numpy()
 
         q = []
         for batch in qry_dataloader:
             batch.update(kwargs)
-            # seq_rep = self.model.traj_encoder.encode_sequence(batch)
-            seq_rep = self.model(batch)
-            if isinstance(seq_rep, tuple):
-                seq_rep = seq_rep[0]
+            if use_raw_embeddings:
+                # Use raw embeddings with average pooling (no LSTM)
+                path = batch['seq'][:,:,0]
+                padding_masks = batch['padding_masks']
+                full_embed = self.model.traj_encoder.embedding.encode(path)
+                padding_masks = padding_masks.unsqueeze(-1).to(self.device)
+                seq_rep = torch.sum(full_embed * padding_masks, 1) / torch.sum(padding_masks, 1)
+            else:
+                # Use LSTM encoder (may be untrained or trained)
+                seq_rep = self.model(batch)
+                if isinstance(seq_rep, tuple):
+                    seq_rep = seq_rep[0]
             q.append(seq_rep.detach().cpu())
         q = torch.cat(q, dim=0).numpy()
 
-        y=np.arange(x.shape[0])                         
+        y=np.arange(x.shape[0])
         # index 类型
         # metric_type = faiss.METRIC
         index = faiss.IndexFlatL2(x.shape[1])
@@ -242,8 +280,11 @@ class SimilaritySearchModel(AbstractModel):
             else:
                 no_hit += 1
         self.result['Mean Rank'] = rank_sum / num_queries + 1.0
-        self.result['No Hit'] = no_hit 
+        self.result['No Hit'] = no_hit
         self.result['HR@3'] =  hit / (num_queries - no_hit)
+
+        eval_type = "Raw Embeddings (Avg Pool)" if use_raw_embeddings else "LSTM Encoder"
+        self._logger.info('=== Evaluation with {} ==='.format(eval_type))
         self._logger.info('HR@3: {}'.format(self.result['HR@3']))
         self._logger.info('Mean Rank: {}, No Hit: {}'.format(self.result['Mean Rank'], self.result['No Hit']))
 
