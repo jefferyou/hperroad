@@ -782,13 +782,40 @@ class HyperbolicGraphEncoderTLCore(Module):
         """
         双曲空间中的加权更新
         使用指数映射和对数映射
+
+        修复：当message范数过小时，避免过度向原点收缩
         """
+        # 计算输入和消息的空间范数
+        x_spatial_norm = torch.norm(x[:, 1:], dim=1, keepdim=True).mean()
+        message_spatial_norm = torch.norm(message[:, 1:], dim=1, keepdim=True).mean()
+
+        # 如果message范数过小（<x的10%），说明message质量不好
+        # 此时减小更新权重，避免被拉向原点
+        if message_spatial_norm < x_spatial_norm * 0.1:
+            # 调整权重：message越小，权重越小
+            ratio = message_spatial_norm / (x_spatial_norm + 1e-10)
+            adjusted_weight = weight * ratio * 10  # 最多保留原权重
+            adjusted_weight = torch.clamp(torch.tensor(adjusted_weight), max=weight)
+            weight = adjusted_weight.item()
+
         # 计算从x到message的方向
         tangent_vec = self.manifold.log_map(x, message)
         # 缩放
         tangent_vec = tangent_vec * weight
         # 沿该方向移动
         updated = self.manifold.exp_map(x, tangent_vec)
+
+        # 范数保持：确保更新后的范数不会过度减小
+        updated_spatial_norm = torch.norm(updated[:, 1:], dim=1, keepdim=True).mean()
+
+        # 如果更新导致范数减小超过30%，则缩放回去
+        if updated_spatial_norm < x_spatial_norm * 0.7:
+            target_norm = x_spatial_norm * 0.85  # 保留85%
+            current_norms = torch.norm(updated[:, 1:], dim=1, keepdim=True)
+            scale = target_norm / (current_norms + 1e-10)
+            updated_spatial = updated[:, 1:] * scale
+            updated = self.manifold.project_to_lorentz(updated_spatial)
+
         return updated
 
     def _compute_hyperbolic_affinity(self, embeddings):
