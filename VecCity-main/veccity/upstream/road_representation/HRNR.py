@@ -70,7 +70,22 @@ class HRNR(AbstractReprLearningModel):
     def _save_final_embeddings(self):
         """在训练结束时保存最终的embeddings"""
         try:
+            # 检查embeddings是否已经在训练过程中保存过
+            if os.path.exists(self.road_embedding_path):
+                file_size = os.path.getsize(self.road_embedding_path) / (1024 * 1024)  # MB
+                self._logger.info(f"Embeddings already saved during training: {self.road_embedding_path}")
+                self._logger.info(f"File size: {file_size:.2f} MB")
+                return
+
             self._logger.info("Saving final embeddings...")
+
+            # 检查node_emb_layer是否已初始化
+            if not hasattr(self.graph_enc, 'node_emb_layer') or self.graph_enc.node_emb_layer is None:
+                self._logger.warning("node_emb_layer is not initialized - embeddings were not generated during training")
+                self._logger.warning("This usually means the training loop didn't complete any iterations")
+                self._logger.warning("Embeddings will be generated during evaluation instead")
+                return
+
             node_embedding = self.graph_enc.node_emb_layer.weight.data.cpu().numpy()
 
             # 确保目录存在
