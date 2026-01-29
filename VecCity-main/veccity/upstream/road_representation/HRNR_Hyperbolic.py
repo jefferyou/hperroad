@@ -640,25 +640,101 @@ class HyperbolicGraphEncoderTLCore(Module):
         return hyp_feat
 
     def _aggregate_to_cluster(self, embeddings, assignment_matrix):
-        """聚合到聚类中心（双曲空间）"""
-        # 简化版：直接使用矩阵乘法聚合空间部分
-        spatial_part = embeddings[:, 1:]  # [N, d]
-        cluster_spatial = torch.mm(assignment_matrix.t(), spatial_part)  # [M, d]
-        # 投影回双曲空间
-        cluster_hyp = self.manifold.project_to_lorentz(cluster_spatial)
-        return cluster_hyp
+        """
+        聚合到聚类中心（双曲空间）
+        修复：使用切空间平均，而不是欧氏空间平均
+        """
+        N, d_plus_1 = embeddings.shape
+        M = assignment_matrix.shape[1]
+        device = embeddings.device
+
+        # Lorentz原点
+        origin = torch.zeros(1, d_plus_1, device=device)
+        origin[0, 0] = 1.0
+
+        cluster_embeddings = []
+
+        for cluster_idx in range(M):
+            weights = assignment_matrix[:, cluster_idx]  # [N]
+
+            # 归一化权重
+            weight_sum = weights.sum()
+            if weight_sum < 1e-10:
+                cluster_embeddings.append(origin.squeeze(0))
+                continue
+
+            weights_normalized = weights / weight_sum
+
+            # 将所有点映射到原点的切空间
+            tangent_vecs = self.manifold.log_map(
+                origin.expand(N, -1),
+                embeddings
+            )  # [N, d+1]
+
+            # 在切空间中做加权平均
+            avg_tangent = (tangent_vecs * weights_normalized.unsqueeze(1)).sum(dim=0)  # [d+1]
+
+            # 映射回流形
+            cluster_emb = self.manifold.exp_map(
+                origin,
+                avg_tangent.unsqueeze(0)
+            ).squeeze(0)  # [d+1]
+
+            cluster_embeddings.append(cluster_emb)
+
+        return torch.stack(cluster_embeddings)
 
     def _distribute_from_cluster(self, cluster_emb, raw_assign, norm_assign):
-        """从聚类分发到节点（双曲空间）"""
-        # 简化版：使用矩阵乘法分发
-        cluster_spatial = cluster_emb[:, 1:]
-        node_spatial = torch.mm(raw_assign, cluster_spatial)
-        # 归一化
-        node_spatial = torch.div(node_spatial,
-                                (F.relu(torch.sum(norm_assign, 1) - 1.0) + 1.0).unsqueeze(1))
-        # 投影回双曲空间
-        node_hyp = self.manifold.project_to_lorentz(node_spatial)
-        return node_hyp
+        """
+        从聚类分发到节点（双曲空间）
+        修复：使用切空间插值，而不是欧氏空间分发
+        """
+        N = raw_assign.shape[0]
+        M = cluster_emb.shape[0]
+        d_plus_1 = cluster_emb.shape[1]
+        device = cluster_emb.device
+
+        # Lorentz原点
+        origin = torch.zeros(1, d_plus_1, device=device)
+        origin[0, 0] = 1.0
+
+        node_embeddings = []
+
+        for node_idx in range(N):
+            weights = raw_assign[node_idx]  # [M]
+
+            # 归一化权重
+            normalizer = F.relu(torch.sum(norm_assign[node_idx]) - 1.0) + 1.0
+            weights_normalized = weights / normalizer
+
+            # 过滤权重>0的聚类
+            mask = weights_normalized > 1e-10
+            if not mask.any():
+                node_embeddings.append(origin.squeeze(0))
+                continue
+
+            cluster_embs_selected = cluster_emb[mask]  # [K, d+1]
+            weights_selected = weights_normalized[mask]  # [K]
+            weights_selected = weights_selected / weights_selected.sum()
+
+            # 在切空间中插值
+            tangent_vecs = self.manifold.log_map(
+                origin.expand(weights_selected.shape[0], -1),
+                cluster_embs_selected
+            )  # [K, d+1]
+
+            # 加权平均
+            avg_tangent = (tangent_vecs * weights_selected.unsqueeze(1)).sum(dim=0)  # [d+1]
+
+            # 映射回流形
+            node_emb = self.manifold.exp_map(
+                origin,
+                avg_tangent.unsqueeze(0)
+            ).squeeze(0)  # [d+1]
+
+            node_embeddings.append(node_emb)
+
+        return torch.stack(node_embeddings)
 
     def _hyperbolic_update(self, x, message, weight=0.5):
         """

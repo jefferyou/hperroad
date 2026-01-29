@@ -12,10 +12,16 @@
 - ❌ 问题出在**图编码器的层次化传播过程**中
 - 空间分量在经过3层图编码器后从~8.9坍缩到~0.0003
 
-根本原因:
-- **不是** HyperbolicEmbedding层的问题
-- **是** 图编码器中的某一层导致空间分量坍缩
-- 需要运行 `diagnose_graph_encoder_collapse.py` 定位具体是哪一层
+**根本原因已找到** (2026-01-29):
+- 🎯 **第1层图编码器导致99.36%的空间信息丢失** (8.65 → 0.055)
+- 罪魁祸首: `_aggregate_to_cluster` 和 `_distribute_from_cluster` 方法
+- 这两个方法在**欧氏空间**中做矩阵乘法聚合/分发，然后投影回双曲空间
+- 加权平均会大幅减小向量范数，导致投影后所有点都接近原点 [1, 0, ..., 0]
+
+**已实施修复**:
+- ✅ 重写 `_aggregate_to_cluster`: 使用切空间平均 (log_map → 平均 → exp_map)
+- ✅ 重写 `_distribute_from_cluster`: 使用切空间插值
+- 代码位置: `veccity/upstream/road_representation/HRNR_Hyperbolic.py:642-737`
 
 ## 修复方案
 
