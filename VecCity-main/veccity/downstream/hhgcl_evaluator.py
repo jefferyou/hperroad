@@ -431,6 +431,51 @@ class HHGCLEvaluator(AbstractEvaluator):
             embedding_path = self.road_embedding_path
         else:
             embedding_path = self.region_embedding_path
+
+        # === 检查 embedding 文件是否存在 ===
+        if not os.path.exists(embedding_path):
+            # 检查是否有评估任务需要运行
+            evaluate_tasks = self.config.get("evaluate_tasks", ["sts","tte","tsi"] if self.representation_object == 'road' else ["eci"])
+
+            if not evaluate_tasks or len(evaluate_tasks) == 0:
+                # 没有评估任务，直接返回
+                self._logger.info(f'No evaluation tasks configured and embedding file not found at {embedding_path}')
+                self._logger.info('Skipping evaluation (training-only mode)')
+                return
+            else:
+                # 有评估任务但embeddings不存在，尝试生成并保存
+                self._logger.warning(f'Embedding file not found at {embedding_path}')
+                self._logger.info('Attempting to generate embeddings from model...')
+
+                try:
+                    # 尝试从模型生成embeddings
+                    if hasattr(model, 'graph_enc') and hasattr(model.graph_enc, 'segment_hyp_emb'):
+                        # 对于双曲模型，使用segment_hyp_emb
+                        actual_model = model.module if hasattr(model, 'module') else model
+                        node_embedding = actual_model.graph_enc.segment_hyp_emb.data.cpu().numpy()
+                    elif hasattr(model, 'node_emb'):
+                        # 对于其他模型，使用node_emb
+                        actual_model = model.module if hasattr(model, 'module') else model
+                        node_embedding = actual_model.node_emb.data.cpu().numpy()
+                    else:
+                        self._logger.error('Cannot extract embeddings from model: no known embedding attribute found')
+                        self._logger.error('Please ensure training completed successfully and embeddings were saved')
+                        return
+
+                    # 保存embeddings
+                    embedding_dir = os.path.dirname(embedding_path)
+                    os.makedirs(embedding_dir, exist_ok=True)
+                    np.save(embedding_path, node_embedding)
+                    self._logger.info(f'Saved embeddings to {embedding_path}, shape={node_embedding.shape}')
+
+                except Exception as e:
+                    self._logger.error(f'Failed to generate embeddings from model: {e}')
+                    self._logger.error('Please ensure training completed successfully')
+                    import traceback
+                    self._logger.error(traceback.format_exc())
+                    return
+        # === END 检查 ===
+
         emb_vec = np.load(embedding_path)
         emb=model
         # Handle DataParallel wrapper - access underlying model's attributes via .module
