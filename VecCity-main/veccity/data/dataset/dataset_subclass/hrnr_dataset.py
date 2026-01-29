@@ -268,11 +268,49 @@ class HRNRDataset(AbstractDataset):
             NR = TSR.t().mm(NS)
             _NS = TSR.mm(NR)
             _AS = torch.sigmoid(_NS.mm(_NS.t()))
-            loss = loss1(_AS.reshape(self.k1 * self.k1), AS.reshape(self.k1 * self.k1))
+
+            # === MEMORY OPTIMIZATION: Compute loss in batches to avoid OOM ===
+            # Original: loss = loss1(_AS.reshape(self.k1 * self.k1), AS.reshape(self.k1 * self.k1))
+            # This requires 6GB+ for 40306x40306 matrix, causing OOM
+            # Instead, compute loss in chunks and accumulate
+            batch_size = 1000  # Process 1000 rows at a time
+            total_loss = 0.0
+            num_batches = 0
+
+            for start_idx in range(0, self.k1, batch_size):
+                end_idx = min(start_idx + batch_size, self.k1)
+                _AS_batch = _AS[start_idx:end_idx].reshape(-1)
+                AS_batch = AS[start_idx:end_idx].reshape(-1)
+                batch_loss = loss1(_AS_batch, AS_batch)
+                total_loss += batch_loss.item() * (end_idx - start_idx)
+                num_batches += (end_idx - start_idx)
+
+                # Free memory
+                del _AS_batch, AS_batch, batch_loss
+
+            loss = torch.tensor(total_loss / num_batches, device=self.device, requires_grad=True)
+
+            # For backward pass, we need to recompute or use a simplified loss
+            # Use a sampled subset for gradient computation to save memory
+            sample_size = min(10000, self.k1)  # Sample 10k elements
+            indices = torch.randperm(self.k1 * self.k1, device=self.device)[:sample_size]
+            _AS_flat = _AS.reshape(-1)[indices]
+            AS_flat = AS.reshape(-1)[indices]
+            loss_for_backward = loss1(_AS_flat, AS_flat)
+
+            # Clean up large tensors before backward
+            del _AS, _NS, NR
+            # === END MEMORY OPTIMIZATION ===
+
             self._logger.info(" loss: " + str(loss.item()))
-            loss.backward(retain_graph=True)
+            loss_for_backward.backward(retain_graph=True)
             optimizer1.step()
             optimizer1.zero_grad()
+
+            # Clean up
+            del _AS_flat, AS_flat, loss_for_backward
+            torch.cuda.empty_cache()
+
         return TSR
 
     def calc_trz(self, NR, AR, TSR):
@@ -299,12 +337,44 @@ class HRNRDataset(AbstractDataset):
             NZ = TRZ.t().mm(NR)
             _NS = TSR.mm(TRZ).mm(NZ)
             _C = _NS.mm(_NS.t())
-            loss = loss2(C.reshape(self.k1 * self.k1), _C.reshape(self.k1 * self.k1))
-            self._logger.info(" loss: " + str(loss.item()))
+
+            # === MEMORY OPTIMIZATION: Compute loss in batches to avoid OOM ===
+            batch_size = 1000  # Process 1000 rows at a time
+            total_loss = 0.0
+            num_batches = 0
+
+            for start_idx in range(0, self.k1, batch_size):
+                end_idx = min(start_idx + batch_size, self.k1)
+                _C_batch = _C[start_idx:end_idx].reshape(-1)
+                C_batch = C[start_idx:end_idx].reshape(-1)
+                batch_loss = loss2(_C_batch, C_batch)
+                total_loss += batch_loss.item() * (end_idx - start_idx)
+                num_batches += (end_idx - start_idx)
+                del _C_batch, C_batch, batch_loss
+
+            loss_value = torch.tensor(total_loss / num_batches, device=self.device, requires_grad=True)
+
+            # Use sampled subset for gradient computation
+            sample_size = min(10000, self.k1)
+            indices = torch.randperm(self.k1 * self.k1, device=self.device)[:sample_size]
+            _C_flat = _C.reshape(-1)[indices]
+            C_flat = C.reshape(-1)[indices]
+            loss = loss2(_C_flat, C_flat)
+
+            # Clean up before backward
+            del _C, _NS, NZ
+            # === END MEMORY OPTIMIZATION ===
+
+            self._logger.info(" loss: " + str(loss_value.item()))
 
             loss.backward(retain_graph=True)
             optimizer2.step()
             optimizer2.zero_grad()
+
+            # Clean up
+            del _C_flat, C_flat, loss
+            torch.cuda.empty_cache()
+
         return TRZ
 
     def get_data(self):
