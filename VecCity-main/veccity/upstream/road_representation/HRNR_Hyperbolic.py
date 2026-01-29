@@ -339,9 +339,13 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                 # 总损失
                 loss = loss_struct + self.lambda_ce * loss_ce + self.lambda_cc * loss_cc
 
-                loss.backward(retain_graph=True)
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), hparams.lp_clip)
                 model_optimizer.step()
+
+                # 定期清理CUDA缓存以减少内存碎片
+                if count % 10 == 0:
+                    torch.cuda.empty_cache()
 
                 if count % 20 == 0:
                     self._logger.info(f"=== DEBUG: Starting evaluation at count={count} ===")
