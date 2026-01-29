@@ -322,7 +322,7 @@ class HyperbolicGraphConv(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.xavier_uniform_(self.weight, gain=0.01)  # 小初始化避免越界
+        nn.init.xavier_uniform_(self.weight, gain=1.0)  # 修复：使用正常的gain
         if self.bias is not None:
             nn.init.zeros_(self.bias)
 
@@ -407,6 +407,20 @@ class HyperbolicGraphConv(nn.Module):
 
             # 投影回双曲空间
             out = self.manifold.project_to_lorentz(out_tangent)
+
+        # 范数保持：防止图卷积导致范数坍缩
+        # 计算输入和输出的空间范数
+        input_spatial_norm = torch.norm(x[:, 1:], dim=1, keepdim=True).mean()
+        output_spatial_norm = torch.norm(out[:, 1:], dim=1, keepdim=True).mean()
+
+        # 如果输出范数过小（<输入的10%），则放大到输入的80%
+        if output_spatial_norm < input_spatial_norm * 0.1:
+            target_norm = input_spatial_norm * 0.8
+            current_norms = torch.norm(out[:, 1:], dim=1, keepdim=True)
+            scale = target_norm / (current_norms + 1e-10)
+            out_spatial_scaled = out[:, 1:] * scale
+            # 重新投影到Lorentz流形
+            out = self.manifold.project_to_lorentz(out_spatial_scaled, k=self.c)
 
         return out
 
