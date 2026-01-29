@@ -642,7 +642,10 @@ class HyperbolicGraphEncoderTLCore(Module):
     def _aggregate_to_cluster(self, embeddings, assignment_matrix):
         """
         聚合到聚类中心（双曲空间）
-        修复：使用切空间平均，而不是欧氏空间平均
+        修复：使用切空间平均 + 范数保持
+
+        关键修复：双曲空间中的平均会导致范数收缩（负曲率的固有性质）
+        为了保持表示能力，我们在聚合后保持空间范数
         """
         N, d_plus_1 = embeddings.shape
         M = assignment_matrix.shape[1]
@@ -651,6 +654,9 @@ class HyperbolicGraphEncoderTLCore(Module):
         # Lorentz原点
         origin = torch.zeros(1, d_plus_1, device=device)
         origin[0, 0] = 1.0
+
+        # 计算输入的空间范数（用于范数保持）
+        input_spatial_norms = torch.norm(embeddings[:, 1:], dim=1)
 
         cluster_embeddings = []
 
@@ -664,6 +670,13 @@ class HyperbolicGraphEncoderTLCore(Module):
                 continue
 
             weights_normalized = weights / weight_sum
+
+            # 计算该聚类的期望范数（加权平均）
+            mask = weights > 1e-10
+            if mask.any():
+                expected_norm = (input_spatial_norms[mask] * weights_normalized[mask]).sum().item()
+            else:
+                expected_norm = 1.0
 
             # 将所有点映射到原点的切空间
             tangent_vecs = self.manifold.log_map(
@@ -680,6 +693,17 @@ class HyperbolicGraphEncoderTLCore(Module):
                 avg_tangent.unsqueeze(0)
             ).squeeze(0)  # [d+1]
 
+            # 范数保持：缩放空间分量以保持期望范数的70%
+            # 70%是为了保留一些收缩（层次结构中上层应该更靠近原点）
+            # 但防止过度收缩到原点
+            current_norm = torch.norm(cluster_emb[1:]).item()
+            if current_norm > 1e-10 and expected_norm > 1e-10:
+                target_norm = expected_norm * 0.7  # 保留70%
+                scale = target_norm / current_norm
+                cluster_spatial_scaled = cluster_emb[1:] * scale
+                # 重新投影到Lorentz流形
+                cluster_emb = self.manifold.project_to_lorentz(cluster_spatial_scaled.unsqueeze(0)).squeeze(0)
+
             cluster_embeddings.append(cluster_emb)
 
         return torch.stack(cluster_embeddings)
@@ -687,7 +711,7 @@ class HyperbolicGraphEncoderTLCore(Module):
     def _distribute_from_cluster(self, cluster_emb, raw_assign, norm_assign):
         """
         从聚类分发到节点（双曲空间）
-        修复：使用切空间插值，而不是欧氏空间分发
+        修复：使用切空间插值 + 范数保持
         """
         N = raw_assign.shape[0]
         M = cluster_emb.shape[0]
@@ -697,6 +721,9 @@ class HyperbolicGraphEncoderTLCore(Module):
         # Lorentz原点
         origin = torch.zeros(1, d_plus_1, device=device)
         origin[0, 0] = 1.0
+
+        # 计算cluster的空间范数
+        cluster_spatial_norms = torch.norm(cluster_emb[:, 1:], dim=1)
 
         node_embeddings = []
 
@@ -717,6 +744,10 @@ class HyperbolicGraphEncoderTLCore(Module):
             weights_selected = weights_normalized[mask]  # [K]
             weights_selected = weights_selected / weights_selected.sum()
 
+            # 计算期望范数
+            cluster_norms_selected = cluster_spatial_norms[mask]
+            expected_norm = (cluster_norms_selected * weights_selected).sum().item()
+
             # 在切空间中插值
             tangent_vecs = self.manifold.log_map(
                 origin.expand(weights_selected.shape[0], -1),
@@ -731,6 +762,16 @@ class HyperbolicGraphEncoderTLCore(Module):
                 origin,
                 avg_tangent.unsqueeze(0)
             ).squeeze(0)  # [d+1]
+
+            # 范数保持：保持期望范数的85%
+            # 分发时保留更多范数（85%），因为这是将粗粒度信息传回细粒度
+            current_norm = torch.norm(node_emb[1:]).item()
+            if current_norm > 1e-10 and expected_norm > 1e-10:
+                target_norm = expected_norm * 0.85  # 保留85%
+                scale = target_norm / current_norm
+                node_spatial_scaled = node_emb[1:] * scale
+                # 重新投影到Lorentz流形
+                node_emb = self.manifold.project_to_lorentz(node_spatial_scaled.unsqueeze(0)).squeeze(0)
 
             node_embeddings.append(node_emb)
 
