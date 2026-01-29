@@ -68,7 +68,8 @@ def run_diagnostic():
     print("="*80)
 
     # Import after path setup
-    from veccity.utils import get_model, get_executor, get_config
+    from veccity.config import ConfigParser
+    from veccity.utils import get_model, get_executor
     from veccity.data import get_dataset
 
     # Patch angle_between
@@ -80,17 +81,17 @@ def run_diagnostic():
     print("\n已安装监控patch，将在训练过程中记录cos_angle值")
 
     # 配置
-    config = get_config(
+    config = ConfigParser(
         task='road_representation',
         model='HRNR_Hyperbolic',
         dataset='cd',
         config_file=None,
         saved_model=False,
         train=True,
-        other_args={'gpu': True, 'gpu_id': 0, 'max_epoch': 5}  # 只训练5个epoch用于诊断
+        other_args={'gpu': True, 'gpu_id': 0}
     )
 
-    config['max_epoch'] = 5  # 限制训练轮数
+    config['max_epoch'] = 5  # 限制训练轮数为5以加快诊断
 
     # 加载数据和模型
     dataset = get_dataset(config)
