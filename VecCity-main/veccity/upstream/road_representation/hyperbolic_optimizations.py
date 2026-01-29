@@ -50,10 +50,9 @@ class Artanh(torch.autograd.Function):
         x = x.clamp(-1.0 + 1e-15, 1.0 - 1e-15)
         ctx.save_for_backward(x)
 
-        # 提升精度计算
-        z = x.double()
-        result = (torch.log_(1 + z).sub_(torch.log_(1 - z))).mul_(0.5)
-        return result.to(x.dtype)
+        # 直接计算，不提升精度（避免内存爆炸）
+        result = (torch.log(1 + x) - torch.log(1 - x)) * 0.5
+        return result
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -72,10 +71,9 @@ class Arcosh(torch.autograd.Function):
         x = x.clamp(min=1.0 + 1e-15)
         ctx.save_for_backward(x)
 
-        # 提升精度计算
-        z = x.double()
-        result = torch.log(z + torch.sqrt(z * z - 1.0))
-        return result.to(x.dtype)
+        # 直接计算，不提升精度（避免内存爆炸）
+        result = torch.log(x + torch.sqrt(x * x - 1.0))
+        return result
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -97,10 +95,10 @@ class Acos(torch.autograd.Function):
         x = x.clamp(min=-1.0 + 1e-5, max=1.0 - 1e-5)
         ctx.save_for_backward(x)
 
-        # 提升精度计算
-        z = x.double()
-        result = torch.acos(z)
-        return result.to(x.dtype)
+        # 直接计算，不提升精度（避免内存爆炸）
+        # float32对于acos已经足够精确
+        result = torch.acos(x)
+        return result
 
     @staticmethod
     def backward(ctx, grad_output):
