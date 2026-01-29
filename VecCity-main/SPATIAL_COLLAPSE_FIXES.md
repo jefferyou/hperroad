@@ -7,13 +7,21 @@
 - 所有embedding聚集在Lorentz原点 [1, 0, 0, ..., 0] 附近
 - 导致所有点之间距离相似,模型无法区分不同的segment
 
+**重要更新**: 经过深入诊断发现:
+- ✅ HyperbolicEmbedding层是**正常**的 (空间范数~8.9)
+- ❌ 问题出在**图编码器的层次化传播过程**中
+- 空间分量在经过3层图编码器后从~8.9坍缩到~0.0003
+
 根本原因:
-- HyperbolicEmbedding层的线性变换输出向量范数太小
-- 根据公式 h = [sqrt(1 + ||x||^2), x],当||x||很小时,所有点都接近原点
+- **不是** HyperbolicEmbedding层的问题
+- **是** 图编码器中的某一层导致空间分量坍缩
+- 需要运行 `diagnose_graph_encoder_collapse.py` 定位具体是哪一层
 
 ## 修复方案
 
-### 方案1: 增加线性层初始化scale (推荐)
+**注意**: 以下方案1-4针对HyperbolicEmbedding层的问题。根据最新诊断，问题在图编码器中，请优先查看**方案5**。
+
+### 方案1: 增加线性层初始化scale (可能不适用)
 
 **位置**: `veccity/upstream/road_representation/hyperbolic_utils.py:181`
 
@@ -111,12 +119,108 @@ self.lane_emb_layer = nn.Embedding(hparams.lane_num, hparams.lane_dims).to(self.
   nn.init.normal_(self.lane_emb_layer.weight, mean=0.0, std=0.1)
   ```
 
-## 推荐流程
+### 方案5: 修复图编码器中的空间坍缩 (推荐 - 根据最新诊断)
 
-1. **先运行诊断脚本** `diagnose_spatial_collapse.py` 确定问题出在哪一步
-2. **如果线性层权重太小**: 使用方案1 (推荐) 或方案3 (快速测试)
-3. **如果原始特征太小**: 使用方案4
-4. **如果以上都不行**: 考虑方案2 (需要更多改动)
+**诊断确认**: 运行 `diagnose_graph_encoder_collapse.py` 确定是哪一层导致坍缩。
+
+可能的问题点：
+
+#### 5.1 检查聚合操作的数值稳定性
+
+**位置**: `veccity/upstream/road_representation/HRNR_Hyperbolic.py:700-730` (HyperbolicGraphEncoderTLCore)
+
+聚合操作 `_aggregate_to_cluster` 可能导致空间分量归零。检查：
+
+```python
+def _aggregate_to_cluster(self, hyp_feat, assign_matrix):
+    """从细粒度聚合到粗粒度"""
+    # 当前实现可能有问题
+```
+
+**可能修复**: 检查是否在聚合时使用了不当的平均操作，导致双曲空间中的向量被错误地平均。
+
+#### 5.2 检查双曲图卷积的实现
+
+**位置**: `veccity/upstream/road_representation/hyperbolic_utils.py` (HyperbolicGraphConv类)
+
+检查：
+- log_map 和 exp_map 是否正确实现
+- 是否有数值下溢导致切向量过小
+- 聚合后的切向量是否被错误地缩放
+
+**调试建议**:
+```python
+# 在 HyperbolicGraphConv.forward() 中添加调试输出
+def forward(self, x, adj):
+    # 添加这些检查
+    print(f"输入空间范数: {self.spatial_norm(x).mean():.6f}")
+
+    # ... 现有代码 ...
+
+    print(f"输出空间范数: {self.spatial_norm(output).mean():.6f}")
+
+    # 如果输出范数 << 输入范数，说明这一层有问题
+```
+
+#### 5.3 检查门控机制
+
+**位置**: `veccity/upstream/road_representation/HRNR_Hyperbolic.py:660-680`
+
+门控操作可能导致空间分量被过度抑制：
+
+```python
+# 检查门控值
+gate_values = self.sigmoid(self.l_c(...))
+print(f"门控值范围: [{gate_values.min():.6f}, {gate_values.max():.6f}]")
+
+# 如果门控值接近0，会导致空间分量被抑制
+```
+
+**可能修复**: 如果门控值过小，调整门控网络的初始化或添加偏置。
+
+#### 5.4 添加残差连接（推荐快速测试）
+
+**位置**: 在每层图编码器输出时添加残差
+
+**修改** `HyperbolicGraphEncoderTLCore.forward()`:
+
+```python
+def forward(self, struct_adj, hyp_feat, raw_adj):
+    # 保存输入
+    input_feat = hyp_feat
+
+    # ... 现有的前向传播 ...
+
+    # 在输出前添加残差连接（在双曲空间中）
+    # 使用 log_map 和 exp_map 实现双曲残差
+    v_input = self.manifold.log_map(output, input_feat)
+    output_with_residual = self.manifold.exp_map(output, 0.1 * v_input)  # 0.1是残差权重
+
+    return output_with_residual
+```
+
+**原理**: 残差连接可以防止空间分量在多层传播中完全消失。
+
+## 推荐流程（更新）
+
+**根据最新诊断，问题在图编码器中，按此流程操作：**
+
+1. **运行图编码器诊断** `diagnose_graph_encoder_collapse.py`
+   - 确定是哪一层导致空间分量坍缩
+   - 查看每层的空间范数变化比例
+
+2. **根据诊断结果选择修复方案**:
+   - 如果某一层导致范数大幅减小 (比例<0.1):
+     - 检查该层的聚合操作 (方案5.1)
+     - 检查双曲图卷积实现 (方案5.2)
+     - 检查门控机制 (方案5.3)
+   - **快速测试**: 添加残差连接 (方案5.4) - 最简单的修复
+
+3. **如果问题不在图编码器** (运行 `diagnose_spatial_collapse.py` 确认):
+   - 如果线性层权重太小: 使用方案1或方案3
+   - 如果原始特征太小: 使用方案4
+
+4. **实施修复后重新测试**
 
 ## 验证修复效果
 
