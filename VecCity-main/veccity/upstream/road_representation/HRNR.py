@@ -23,6 +23,7 @@ class HRNR(AbstractReprLearningModel):
         self.exp_id = config.get('exp_id', None)
         self.dataset = config.get('dataset', '')
         self.output_dim = config.get('output_dim', 128)
+        self.embed_size = config.get('embed_size', 128)  # Road embedding size
         self.label_num = data_feature.get('label_class')
 
         self.struct_assign = data_feature.get("struct_assign").to(self.device)
@@ -55,7 +56,7 @@ class HRNR(AbstractReprLearningModel):
         self.model_cache_file = './veccity/cache/{}/model_cache/embedding_{}_{}_{}.m'. \
             format(self.exp_id, self.model, self.dataset, self.output_dim)
         self.road_embedding_path = './veccity/cache/{}/evaluate_cache/road_embedding_{}_{}_{}.npy'. \
-            format(self.exp_id, self.model, self.dataset, self.output_dim)
+            format(self.exp_id, self.model, self.dataset, self.embed_size)
 
     def encode(self, x):
         self.node_emb = self.graph_enc(self.node_feature, self.type_feature, self.length_feature, self.lane_feature, self.adj)
@@ -65,7 +66,33 @@ class HRNR(AbstractReprLearningModel):
         output_state = self.linear(output_state)
 
         return output_state
-        
+
+    def _save_final_embeddings(self):
+        """在训练结束时保存最终的embeddings"""
+        try:
+            self._logger.info("Saving final embeddings...")
+            node_embedding = self.graph_enc.node_emb_layer.weight.data.cpu().numpy()
+
+            # 确保目录存在
+            embedding_dir = os.path.dirname(self.road_embedding_path)
+            os.makedirs(embedding_dir, exist_ok=True)
+
+            # 保存
+            np.save(self.road_embedding_path, node_embedding)
+            self._logger.info(f"Final embeddings saved to {self.road_embedding_path}")
+            self._logger.info(f"Embedding shape: {node_embedding.shape}")
+
+            # 验证文件是否创建成功
+            if os.path.exists(self.road_embedding_path):
+                file_size = os.path.getsize(self.road_embedding_path) / (1024 * 1024)  # MB
+                self._logger.info(f"✓ Verified: File exists ({file_size:.2f} MB)")
+            else:
+                self._logger.error(f"✗ ERROR: File was not created at {self.road_embedding_path}")
+        except Exception as e:
+            self._logger.error(f"Failed to save final embeddings: {e}")
+            import traceback
+            self._logger.error(traceback.format_exc())
+
     def run(self, train_dataloader, eval_dataloader):
         self._logger.info("Starting training...")
         hparams = dict_to_object(self.config.config)
@@ -111,17 +138,18 @@ class HRNR(AbstractReprLearningModel):
                             self._logger.info("max_f1: " + str(max_f1))
                             self._logger.info("step " + str(count))
                             self._logger.info(loss.item())
+                            # 保存最终的embeddings
+                            self._save_final_embeddings()
                             return
                     self._logger.info("max_auc: " + str(max_auc))
                     self._logger.info("max_f1: " + str(max_f1))
                     self._logger.info("step " + str(count))
                     self._logger.info(loss.item())
                 count += 1
-                
-        # node_embedding = self.graph_enc.node_emb_layer.weight.data.cpu().numpy()
-        # np.save(self.road_embedding_path,node_embedding)
-        # 在pipeline 会save
-        # torch.save((self.state_dict(), self.optimizer.state_dict()), self.model_cache_file)
+
+        # 训练正常结束，保存最终的embeddings
+        self._logger.info("Training completed normally")
+        self._save_final_embeddings()
     
     def test_label_pred(self,  test_set, test_label, device):
         right = 0
