@@ -693,12 +693,12 @@ class HyperbolicGraphEncoderTLCore(Module):
                 avg_tangent.unsqueeze(0)
             ).squeeze(0)  # [d+1]
 
-            # 范数保持：缩放空间分量以保持期望范数的70%
-            # 70%是为了保留一些收缩（层次结构中上层应该更靠近原点）
-            # 但防止过度收缩到原点
+            # 范数保持：缩放空间分量以保持期望范数的80%
+            # 优化：提高保留率从70%到80%，减少收缩
+            # 仍保留一些收缩体现层次结构，但防止过度坍缩
             current_norm = torch.norm(cluster_emb[1:]).item()
             if current_norm > 1e-10 and expected_norm > 1e-10:
-                target_norm = expected_norm * 0.7  # 保留70%
+                target_norm = expected_norm * 0.8  # 保留80% (优化前: 70%)
                 scale = target_norm / current_norm
                 cluster_spatial_scaled = cluster_emb[1:] * scale
                 # 重新投影到Lorentz流形
@@ -763,11 +763,12 @@ class HyperbolicGraphEncoderTLCore(Module):
                 avg_tangent.unsqueeze(0)
             ).squeeze(0)  # [d+1]
 
-            # 范数保持：保持期望范数的85%
-            # 分发时保留更多范数（85%），因为这是将粗粒度信息传回细粒度
+            # 范数保持：保持期望范数的90%
+            # 优化：提高保留率从85%到90%
+            # 分发时保留更多范数，因为这是将粗粒度信息传回细粒度
             current_norm = torch.norm(node_emb[1:]).item()
             if current_norm > 1e-10 and expected_norm > 1e-10:
-                target_norm = expected_norm * 0.85  # 保留85%
+                target_norm = expected_norm * 0.90  # 保留90% (优化前: 85%)
                 scale = target_norm / current_norm
                 node_spatial_scaled = node_emb[1:] * scale
                 # 重新投影到Lorentz流形

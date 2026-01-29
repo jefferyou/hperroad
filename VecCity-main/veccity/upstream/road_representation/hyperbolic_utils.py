@@ -413,9 +413,10 @@ class HyperbolicGraphConv(nn.Module):
         input_spatial_norm = torch.norm(x[:, 1:], dim=1, keepdim=True).mean()
         output_spatial_norm = torch.norm(out[:, 1:], dim=1, keepdim=True).mean()
 
-        # 如果输出范数过小（<输入的10%），则放大到输入的80%
-        if output_spatial_norm < input_spatial_norm * 0.1:
-            target_norm = input_spatial_norm * 0.8
+        # 优化：提高保留率从80%到90%，检测阈值从10%放宽到15%
+        # 如果输出范数过小（<输入的15%），则放大到输入的90%
+        if output_spatial_norm < input_spatial_norm * 0.15:
+            target_norm = input_spatial_norm * 0.9  # 保留90% (优化前: 80%)
             current_norms = torch.norm(out[:, 1:], dim=1, keepdim=True)
             scale = target_norm / (current_norms + 1e-10)
             out_spatial_scaled = out[:, 1:] * scale
