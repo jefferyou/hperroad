@@ -82,7 +82,7 @@ def run_diagnostic():
 
     # 配置
     config = ConfigParser(
-        task='road_representation',
+        task='segment',  # 修正：应该是segment，不是road_representation
         model='HRNR_Hyperbolic',
         dataset='cd',
         config_file=None,
