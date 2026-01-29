@@ -99,15 +99,14 @@ def run_diagnostic():
     model.eval()
 
     # 先做一次forward pass生成嵌入
-    print("\n步骤1: 生成嵌入（调用encode）")
+    print("\n步骤1: 生成嵌入（调用graph_enc直接生成）")
     try:
-        # 从dataloader获取一个batch
-        train_dataloader = dataset.train_dataloader
-        train_set, train_label = next(iter(train_dataloader))
-        train_set = train_set.clone().detach().to(device)
-
-        # 调用encode生成嵌入
-        _ = model.encode(train_set)
+        # 直接调用graph_enc生成层次化嵌入
+        # graph_enc.forward会生成segment_hyp_emb, locality_hyp_emb, region_hyp_emb
+        model.node_emb = model.graph_enc(
+            model.node_feature, model.type_feature, model.length_feature, model.lane_feature, model.adj
+        )
+        model.init_emb = model.graph_enc.init_feat
         print("✓ 嵌入已生成")
 
     except Exception as e:
