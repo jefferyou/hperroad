@@ -342,11 +342,36 @@ class HRNRDataset(AbstractDataset):
         loss2 = torch.nn.MSELoss()
         optimizer2 = optim.Adam(RZ_GCN.parameters(), lr=1e-3)  # TODO: lr
         optimizer2.zero_grad()
-        C = torch.tensor(Utils(self.num_nodes, self.adj_matrix).get_reachable_matrix(),
-                        dtype=torch.float, device=self.device)
-        # 将频次转移矩阵转化为频率转移矩阵
+
+        # === MEMORY OPTIMIZATION: Create C matrix in chunks to avoid OOM ===
+        # Original: Full 40306x40306 matrix creation at once (6GB)
+        # New: Create in chunks and add trans_matrix incrementally
+
+        self._logger.info("Creating reachability and transition matrix in chunks...")
+        reachable_matrix = Utils(self.num_nodes, self.adj_matrix).get_reachable_matrix()
         trans_matrix = self.trans_matrix / (self.trans_matrix.sum(0) + 1e-10)
-        C = C + torch.tensor(trans_matrix, dtype=torch.float, device=self.device) # 引入轨迹转移矩阵
+
+        # Create C on GPU in chunks to avoid memory spike
+        chunk_size = 1000  # Process 1000 rows at a time
+        C = torch.zeros(self.k1, self.k1, dtype=torch.float, device=self.device)
+
+        for start_idx in range(0, self.k1, chunk_size):
+            end_idx = min(start_idx + chunk_size, self.k1)
+
+            # Convert chunk to GPU tensor and add to C
+            reach_chunk = torch.tensor(reachable_matrix[start_idx:end_idx],
+                                      dtype=torch.float, device=self.device)
+            trans_chunk = torch.tensor(trans_matrix[start_idx:end_idx],
+                                      dtype=torch.float, device=self.device)
+
+            C[start_idx:end_idx] = reach_chunk + trans_chunk
+
+            # Free memory immediately
+            del reach_chunk, trans_chunk
+
+        self._logger.info(f"C matrix created successfully, shape: {C.shape}")
+        # === END MEMORY OPTIMIZATION ===
+
         self._logger.info("calculating TRZ...")
         for i in range(300):  # TODO: 迭代次数
             self._logger.info("epoch " + str(i))
