@@ -9,8 +9,16 @@ from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_sc
 from sklearn.preprocessing import label_binarize
 from datetime import datetime, timezone, timedelta
 
-# initializing here!!
-nvmlInit() 
+# Initialize NVML with error handling
+try:
+    nvmlInit()
+    NVML_AVAILABLE = True
+except Exception as e:
+    # NVML initialization failed - this is OK, we can continue without GPU monitoring
+    # Common causes: driver version mismatch, no NVIDIA GPU, permissions issues
+    print(f"Warning: NVML initialization failed: {e}")
+    print("GPU monitoring will be disabled, but training will continue normally.")
+    NVML_AVAILABLE = False 
 
 def mean(x):
     if x == []:
@@ -209,12 +217,32 @@ timer = Timer()
 
 class GPUInfo:
 
-    _h = nvmlDeviceGetHandleByIndex(0)
+    _h = None
+
+    @classmethod
+    def _init_handle(cls):
+        """Lazy initialization of GPU handle"""
+        if cls._h is None and NVML_AVAILABLE:
+            try:
+                cls._h = nvmlDeviceGetHandleByIndex(0)
+            except:
+                pass
 
     @classmethod
     def mem(cls):
-        info = nvmlDeviceGetMemoryInfo(cls._h)
-        return info.used // 1048576, info.total // 1048576 # in MB
+        """Get GPU memory usage. Returns (0, 0) if NVML unavailable."""
+        if not NVML_AVAILABLE:
+            return 0, 0
+
+        cls._init_handle()
+        if cls._h is None:
+            return 0, 0
+
+        try:
+            info = nvmlDeviceGetMemoryInfo(cls._h)
+            return info.used // 1048576, info.total // 1048576 # in MB
+        except:
+            return 0, 0
 
 class RAMInfo:
     @classmethod
