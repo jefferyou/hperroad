@@ -159,8 +159,8 @@ class SimilaritySearchModel(AbstractModel):
         self.model = STSModel(embedding=model, device=self.device)
         self.model.to(self.device)
         optimizer = Adam(lr=self.learning_rate, params=self.model.parameters(), weight_decay=self.weight_decay)
-        # # 先测试
-        self.evaluation()
+        # 初始评估已注释：训练前的评估可能造成混淆（随机初始化的LSTM仍能达到高分）
+        # self.evaluation()
         best_loss=-1
         best_model=None
         best_epoch=0
