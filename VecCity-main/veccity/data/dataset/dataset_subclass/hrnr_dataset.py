@@ -429,7 +429,7 @@ class HRNRDataset(AbstractDataset):
             optimizer2.zero_grad()
 
             # Clean up
-            del _C_flat, C_flat, loss
+            del loss
             torch.cuda.empty_cache()
 
         return TRZ
