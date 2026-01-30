@@ -307,16 +307,18 @@ class HRNRDataset(AbstractDataset):
             loss_value = total_loss / num_elements
 
             # For backward pass, use tiny sampled subset
-            # Sample 100 rows x 50 cols = 5000 elements
-            sample_rows = torch.randint(0, self.k1, (100,), device=self.device)
-            sample_cols = torch.randint(0, self.k1, (50,), device=self.device)
+            # Sample rows and compute loss on those rows only
+            num_sample_rows = min(100, self.k1)
+            sample_rows = torch.randperm(self.k1, device=self.device)[:num_sample_rows]
 
-            _AS_sample = torch.sigmoid(_NS[sample_rows][:, sample_cols].mm(_NS[sample_cols].t()))
-            AS_sample = AS[sample_rows][:, sample_cols]
+            # Compute _AS for sampled rows: sigmoid(_NS[rows] @ _NS.T)
+            _NS_sampled = _NS[sample_rows]  # [num_sample_rows, hidden_dim]
+            _AS_sample = torch.sigmoid(_NS_sampled.mm(_NS.t()))  # [num_sample_rows, k1]
+            AS_sample = AS[sample_rows]  # [num_sample_rows, k1]
             loss_for_backward = loss1(_AS_sample.reshape(-1), AS_sample.reshape(-1))
 
             # Clean up before backward
-            del _NS, NR, _AS_sample, AS_sample
+            del _NS, NR, _AS_sample, AS_sample, _NS_sampled
             # === END MEMORY OPTIMIZATION ===
 
             self._logger.info(" loss: " + str(loss_value))
@@ -325,7 +327,7 @@ class HRNRDataset(AbstractDataset):
             optimizer1.zero_grad()
 
             # Clean up
-            del _AS_flat, AS_flat, loss_for_backward
+            del loss_for_backward
             torch.cuda.empty_cache()
 
         return TSR
@@ -381,15 +383,18 @@ class HRNRDataset(AbstractDataset):
             loss_value = total_loss / num_elements
 
             # For backward pass, use tiny sampled subset
-            sample_rows = torch.randint(0, self.k1, (100,), device=self.device)
-            sample_cols = torch.randint(0, self.k1, (50,), device=self.device)
+            # Sample rows and compute loss on those rows only
+            num_sample_rows = min(100, self.k1)
+            sample_rows = torch.randperm(self.k1, device=self.device)[:num_sample_rows]
 
-            _C_sample = _NS[sample_rows][:, sample_cols].mm(_NS[sample_cols].t())
-            C_sample = C[sample_rows][:, sample_cols]
+            # Compute _C for sampled rows: _NS[rows] @ _NS.T
+            _NS_sampled = _NS[sample_rows]  # [num_sample_rows, hidden_dim]
+            _C_sample = _NS_sampled.mm(_NS.t())  # [num_sample_rows, k1]
+            C_sample = C[sample_rows]  # [num_sample_rows, k1]
             loss = loss2(_C_sample.reshape(-1), C_sample.reshape(-1))
 
             # Clean up before backward
-            del _NS, NZ, _C_sample, C_sample
+            del _NS, NZ, _C_sample, C_sample, _NS_sampled
             # === END MEMORY OPTIMIZATION ===
 
             self._logger.info(" loss: " + str(loss_value))
