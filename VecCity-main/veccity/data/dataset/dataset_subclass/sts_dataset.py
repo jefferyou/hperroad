@@ -136,10 +136,20 @@ class List_Dataset(Dataset):
             # new_loc_list = [self.vocab.loc2index.get(loc, self.vocab.unk_index) for loc in loc_list]
             new_tim_list = [datetime.datetime.fromtimestamp(tim) for tim in tim_list]
             new_loc_list=loc_list
-            # tim_list=tim_list 
+            # tim_list=tim_list
             minutes = [new_tim.hour * 60 + new_tim.minute + 1 for new_tim in new_tim_list]
             weeks = [new_tim.weekday() + 1 for new_tim in new_tim_list]
             usr_list = [self.vocab.unk_index] * len(new_loc_list)
+
+            # 修复内存泄漏：截断过长的轨迹到seq_len，避免创建超大temporal_mat
+            max_len = self.seq_len if self.seq_len > 0 else len(new_loc_list)
+            if len(new_loc_list) > max_len:
+                new_loc_list = new_loc_list[:max_len]
+                tim_list = tim_list[:max_len]
+                minutes = minutes[:max_len]
+                weeks = weeks[:max_len]
+                usr_list = usr_list[:max_len]
+
             temporal_mat = self._cal_mat(tim_list)
             temporal_mat_list.append(temporal_mat)
             traj_feat = np.array([new_loc_list, tim_list, minutes, weeks, usr_list]).transpose((1, 0))
@@ -154,14 +164,14 @@ class List_Dataset(Dataset):
 
             loc_list = self.traj[i]
             tim_list = self.tlist[i]
-            
+
             if type(tim_list) == type("str"):
                 tim_list=eval(tim_list)
 
             new_loc_list = [self.vocab.loc2index.get(loc, self.vocab.unk_index) for loc in loc_list]
             new_tim_list = [datetime.datetime.fromtimestamp(tim) for tim in tim_list]
             # new_loc_list=loc_list
-            # tim_list=tim_list 
+            # tim_list=tim_list
             minutes = [new_tim.hour * 60 + new_tim.minute + 1 for new_tim in new_tim_list]
             weeks = [new_tim.weekday() + 1 for new_tim in new_tim_list]
             usr_list = [self.vocab.unk_index] * len(new_loc_list)
@@ -171,6 +181,17 @@ class List_Dataset(Dataset):
                 weeks = [self.vocab.pad_index] + weeks
                 usr_list = [usr_list[0]] + usr_list
                 tim_list = [tim_list[0]] + tim_list
+
+            # 修复内存泄漏：截断过长的轨迹到seq_len，避免创建超大temporal_mat
+            # sf数据集有长度718的轨迹，会创建718x718矩阵(~4MB)，累积导致OOM
+            max_len = self.seq_len if self.seq_len > 0 else len(new_loc_list)
+            if len(new_loc_list) > max_len:
+                new_loc_list = new_loc_list[:max_len]
+                tim_list = tim_list[:max_len]
+                minutes = minutes[:max_len]
+                weeks = weeks[:max_len]
+                usr_list = usr_list[:max_len]
+
             temporal_mat = self._cal_mat(tim_list)
             temporal_mat_list.append(temporal_mat)
             traj_feat = np.array([new_loc_list, tim_list, minutes, weeks, usr_list]).transpose((1, 0))
