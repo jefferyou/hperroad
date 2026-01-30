@@ -138,8 +138,11 @@ class SimilaritySearchModel(AbstractModel):
 
         self.dataset=STSDataset(config,filte=False)
         self.train_ori_dataloader,self.train_qry_dataloader,self.test_ori_dataloader,self.test_qry_dataloader = self.dataset.get_data()
-        self.device=config.get('device')        
-        self.epochs=config.get('task_epoch',50)
+        self.device=config.get('device')
+        # STS-specific max_epoch to prevent overfitting (default 140, or task_epoch as fallback)
+        self.epochs=config.get('sts_max_epoch', config.get('task_epoch', 50))
+        # STS early stopping patience (default 30)
+        self.patience=config.get('sts_patience', 30)
         self.learning_rate=1e-4#config.get('learning_rate',1e-4)
         self.weight_decay=config.get('weight_decay',1e-3)
     
@@ -161,6 +164,7 @@ class SimilaritySearchModel(AbstractModel):
         best_loss=-1
         best_model=None
         best_epoch=0
+        patience_counter = self.patience  # Early stopping counter
         self.model.train()
 
         for epoch in range(self.epochs):
@@ -175,7 +179,7 @@ class SimilaritySearchModel(AbstractModel):
                 total_loss += loss.item()
 
             total_loss=total_loss/len(self.train_ori_dataloader)
-            
+
             valid_loss=0.0
             with torch.no_grad():
                 for step,(batch1,batch2) in enumerate(zip(self.test_ori_dataloader,self.test_qry_dataloader)):
@@ -189,7 +193,17 @@ class SimilaritySearchModel(AbstractModel):
                 best_model=copy.copy(self.model)
                 best_loss=valid_loss
                 best_epoch=epoch
+                patience_counter = self.patience  # Reset patience on improvement
+            else:
+                patience_counter -= 1
+
             self._logger.info("epoch {} complete! training loss {:.2f}, valid loss {:2f}, best_epoch {}, best_loss {:2f}".format(epoch, total_loss, valid_loss,best_epoch,best_loss))
+
+            # Early stopping check
+            if patience_counter <= 0:
+                self._logger.info("Early stopping triggered at epoch {}. Best epoch: {}, best loss: {:.6f}".format(epoch, best_epoch, best_loss))
+                break
+
         if best_model:
             self.model=best_model
 

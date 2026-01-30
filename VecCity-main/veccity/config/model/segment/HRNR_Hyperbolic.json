@@ -73,5 +73,6 @@
     "_comment_downstream": "=== Downstream task training parameters ===",
     "task_epoch": 200,
     "tte_patience": 30,
+    "sts_max_epoch": 140,
     "sts_patience": 30
 }
