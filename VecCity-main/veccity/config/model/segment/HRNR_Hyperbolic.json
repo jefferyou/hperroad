@@ -68,5 +68,10 @@
     "lambda_cc": 0.1,
     "temperature": 0.07,
     "curvature": 1.0,
-    "max_epoch": 100
+    "max_epoch": 100,
+
+    "_comment_downstream": "=== Downstream task training parameters ===",
+    "task_epoch": 200,
+    "tte_patience": 30,
+    "sts_patience": 30
 }

@@ -156,7 +156,10 @@ class TravelTimeEstimationModel(AbstractModel):
         )
 
         loss_fn = nn.MSELoss()
-        patience = 10
+
+        # Configurable patience for early stopping (default 30, increased from 10)
+        patience = self.config.get('tte_patience', 30)
+        initial_patience = patience  # Store initial patience for reset
 
         # Gradient clipping threshold
         max_grad_norm = self.config.get('max_grad_norm', 1.0)
@@ -208,12 +211,12 @@ class TravelTimeEstimationModel(AbstractModel):
             # self._writer.add_scalar('ETA Valid RMSE', rmse, epoch)
             if mae < best["mae"]:
                 best = {"best epoch": epoch, "mae": mae, "rmse": rmse}
-                patience = 10
+                patience = initial_patience  # Reset to initial patience value
                 # best_model=copy.deepcopy(model)
             else:
                 patience -= 1
                 if not patience:
-                    self._logger.info("Best epoch: {}, MAE:{}, RMSE:{}".format(best['best epoch'], best['mae'], best["rmse"]))
+                    self._logger.info("Early stopping triggered. Best epoch: {}, MAE:{}, RMSE:{}".format(best['best epoch'], best['mae'], best["rmse"]))
                     break
 
         model.eval()
