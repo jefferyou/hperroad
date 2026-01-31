@@ -51,6 +51,7 @@ MapRL models encodes various entities in a unified configuration, which facilita
 | CTLE   | POI            | Seq-based   |--task poi --model CTLE      | [Lin et al., AAAI 2022](https://ojs.aaai.org/index.php/AAAI/article/view/16548)      |
 | RN2Vec | Segment        | Token-based |--task segment --model RN2Vec    | [Wang et al., TIST 2021](https://dl.acm.org/doi/10.1145/3424346)     |
 | HRNR   | Segment        | Graph-based |--task segment --model HRNR      | [Wu et al., KDD 2020](https://dl.acm.org/doi/10.1145/3394486.3403043)        |
+| **HRNR_Hyperbolic** ⭐ | Segment   | **Hyperbolic** |--task segment --model HRNR_Hyperbolic | Hyperbolic extension with spatial collapse fixes ([docs/](docs/HRNR_HYPERBOLIC_COMPLETE_GUIDE.md)) |
 | SARN   | Segment        | Graph-based |--task segment --model SARN      | [Chang et al., EDBT 2023](https://openproceedings.org/2023/conf/edbt/paper-193.pdf)            |
 | Toast  | Segment        | Seq-based   |--task segment --model Toast     | [Chen et al., CIKM 2021](https://dl.acm.org/doi/abs/10.1145/3459637.3482293)     |
 | HRoad  | Segment        | Graph-based |--task segment --model HyperRoad | [Zhang et al.,TKDD 2023](https://dl.acm.org/doi/full/10.1145/3592859)                         |
@@ -290,3 +291,65 @@ If you find our work is useful for your research, please consider citing:
 [![Stargazers repo roster for @Bigscity-VecCity/VecCity](https://reporoster.com/stars/Bigscity-VecCity/VecCity)](https://github.com/Bigscity-VecCity/VecCity/stargazers)
 
 [![Forkers repo roster for @Bigscity-VecCity/VecCity](https://reporoster.com/forks/Bigscity-VecCity/VecCity)](https://github.com/Bigscity-VecCity/VecCity/network/members)
+
+---
+
+## 7. Project Structure (Optimized)
+
+After cleanup and optimization, the project structure is organized as follows:
+
+```
+VecCity-main/
+├── docs/                                    # 📚 All documentation
+│   ├── HRNR_HYPERBOLIC_COMPLETE_GUIDE.md   # Complete guide for HRNR_Hyperbolic
+│   ├── DIAGNOSIS_AND_FIX_GUIDE.md          # Historical diagnosis guide
+│   ├── TRAINING_GUIDE.md                    # Training procedures
+│   ├── HYPERBOLIC_OPTIMIZATIONS.md          # Optimization details
+│   ├── SPATIAL_COLLAPSE_FIXES.md            # Spatial collapse fixes
+│   └── TANGENT_SPACE_OPTIMIZATION.md        # Tangent space optimizations
+│
+├── debug_scripts/                           # 🔧 Historical debug/test scripts
+│   ├── diagnose_*.py                        # Diagnosis scripts
+│   ├── test_*.py                            # Unit tests
+│   ├── verify_*.py                          # Verification scripts
+│   └── check_*.py                           # Checking scripts
+│
+├── veccity/                                 # 🏗️ Main library
+│   ├── upstream/road_representation/
+│   │   ├── HRNR_Hyperbolic.py              # Hyperbolic model (with fixes)
+│   │   ├── hyperbolic_utils.py             # Hyperbolic operations
+│   │   └── hyperbolic_optimizations.py     # Custom autograd functions
+│   ├── downstream/                          # Downstream tasks
+│   └── data/dataset/                        # Dataset processing
+│
+├── run_model.py                             # 🚀 Run full pipeline
+├── run_training_only.py                     # 🏋️ Training only
+├── run_downstream_only.py                   # 📊 Downstream evaluation only
+└── README.md                                # This file
+
+```
+
+### Key Changes
+- ✅ **Consolidated documentation** into `docs/` directory
+- ✅ **Moved debug scripts** to `debug_scripts/` for cleaner root directory
+- ✅ **Organized by purpose**: code, docs, and debug scripts are clearly separated
+- ✅ **Complete guide**: All technical details in one comprehensive document
+
+### HRNR_Hyperbolic Quick Reference
+
+**Training:**
+```bash
+python run_training_only.py --task segment --model HRNR_Hyperbolic --dataset cd --device gpu
+```
+
+**Downstream Evaluation:**
+```bash
+python run_downstream_only.py --task segment --model HRNR_Hyperbolic --dataset cd --device gpu --exp_id <EXP_ID>
+```
+
+**Full Documentation:**
+See [docs/HRNR_HYPERBOLIC_COMPLETE_GUIDE.md](docs/HRNR_HYPERBOLIC_COMPLETE_GUIDE.md) for:
+- Spatial collapse issue & fixes (5000x improvement)
+- Memory optimization techniques
+- Configuration parameters
+- Troubleshooting guide
