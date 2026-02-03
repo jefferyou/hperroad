@@ -277,14 +277,17 @@ class HRNRDataset(AbstractDataset):
 
             NR = TSR.t().mm(NS)
             _NS = TSR.mm(NR)
-            _AS = torch.sigmoid(_NS.mm(_NS.t()))
 
-            # Compute loss in batches to avoid OOM
+            # Compute loss in batches to avoid creating full _AS matrix (40306x40306)
+            # This prevents OOM by never materializing the full matrix
             total_loss = 0.0
             num_batches = 0
             for start_idx in range(0, self.k1, batch_size):
                 end_idx = min(start_idx + batch_size, self.k1)
-                batch_pred = _AS[start_idx:end_idx, :].reshape(-1)
+                # Compute only the needed rows of _AS to avoid memory explosion
+                _NS_batch = _NS[start_idx:end_idx, :]
+                _AS_batch = torch.sigmoid(_NS_batch.mm(_NS.t()))
+                batch_pred = _AS_batch.reshape(-1)
                 batch_target = AS[start_idx:end_idx, :].reshape(-1)
                 batch_loss = loss1(batch_pred, batch_target)
                 total_loss += batch_loss.item()
@@ -333,14 +336,17 @@ class HRNRDataset(AbstractDataset):
 
             NZ = TRZ.t().mm(NR)
             _NS = TSR.mm(TRZ).mm(NZ)
-            _C = _NS.mm(_NS.t())
 
-            # Compute loss in batches to avoid OOM
+            # Compute loss in batches to avoid creating full _C matrix (40306x40306)
+            # This prevents OOM by never materializing the full matrix
             total_loss = 0.0
             num_batches = 0
             for start_idx in range(0, self.k1, batch_size):
                 end_idx = min(start_idx + batch_size, self.k1)
-                batch_pred = _C[start_idx:end_idx, :].reshape(-1)
+                # Compute only the needed rows of _C to avoid memory explosion
+                _NS_batch = _NS[start_idx:end_idx, :]
+                _C_batch = _NS_batch.mm(_NS.t())
+                batch_pred = _C_batch.reshape(-1)
                 batch_target = C[start_idx:end_idx, :].reshape(-1)
                 batch_loss = loss2(batch_pred, batch_target)
                 total_loss += batch_loss.item()
