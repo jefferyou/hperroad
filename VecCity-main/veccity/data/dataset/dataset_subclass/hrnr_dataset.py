@@ -189,6 +189,10 @@ class HRNRDataset(AbstractDataset):
             self.fnc_assign = pickle.load(open(self.trz, "rb"))
             return
 
+        # Clear GPU cache before starting memory-intensive operations
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         self.node_emb_layer = nn.Embedding(self.num_nodes+1, self.config.get("node_dims")).to(self.device)
         self.type_emb_layer = nn.Embedding(self.type_num, self.config.get("type_dims")).to(self.device)
         self.length_emb_layer = nn.Embedding(self.length_num, self.config.get("length_dims")).to(
@@ -258,6 +262,10 @@ class HRNRDataset(AbstractDataset):
         loss1 = torch.nn.BCELoss()
         optimizer1 = optim.Adam(SR_GAT.parameters(), lr=1e-4)  # TODO: lr
         optimizer1.zero_grad()
+
+        # Configuration for memory-efficient loss computation
+        batch_size = min(1000, self.k1)  # Process matrix in chunks to avoid OOM
+
         for i in range(300):  # TODO: 迭代次数
             self._logger.info("epoch " + str(i))
             W1 = SR_GAT(NS, sparse_AS)
@@ -268,11 +276,32 @@ class HRNRDataset(AbstractDataset):
             NR = TSR.t().mm(NS)
             _NS = TSR.mm(NR)
             _AS = torch.sigmoid(_NS.mm(_NS.t()))
-            loss = loss1(_AS.reshape(self.k1 * self.k1), AS.reshape(self.k1 * self.k1))
-            self._logger.info(" loss: " + str(loss.item()))
-            loss.backward(retain_graph=True)
+
+            # Compute loss in batches to avoid OOM
+            total_loss = 0.0
+            num_batches = 0
+            for start_idx in range(0, self.k1, batch_size):
+                end_idx = min(start_idx + batch_size, self.k1)
+                batch_pred = _AS[start_idx:end_idx, :].reshape(-1)
+                batch_target = AS[start_idx:end_idx, :].reshape(-1)
+                batch_loss = loss1(batch_pred, batch_target)
+                total_loss += batch_loss.item()
+                batch_loss.backward(retain_graph=True)
+                num_batches += 1
+
+                # Clear cache periodically to free up memory
+                if num_batches % 10 == 0:
+                    torch.cuda.empty_cache()
+
+            loss_value = total_loss / num_batches
+            self._logger.info(" loss: " + str(loss_value))
+
             optimizer1.step()
             optimizer1.zero_grad()
+
+            # Clear cache after each epoch
+            torch.cuda.empty_cache()
+
         return TSR
 
     def calc_trz(self, NR, AR, TSR):
@@ -291,6 +320,10 @@ class HRNRDataset(AbstractDataset):
         trans_matrix = self.trans_matrix / (self.trans_matrix.sum(0) + 1e-10)
         C = C + torch.tensor(trans_matrix, dtype=torch.float, device=self.device) # 引入轨迹转移矩阵
         self._logger.info("calculating TRZ...")
+
+        # Configuration for memory-efficient loss computation
+        batch_size = min(1000, self.k1)  # Process matrix in chunks to avoid OOM
+
         for i in range(300):  # TODO: 迭代次数
             self._logger.info("epoch " + str(i))
             TRZ = RZ_GCN(NR.unsqueeze(0), AR.unsqueeze(0)).squeeze()
@@ -299,12 +332,32 @@ class HRNRDataset(AbstractDataset):
             NZ = TRZ.t().mm(NR)
             _NS = TSR.mm(TRZ).mm(NZ)
             _C = _NS.mm(_NS.t())
-            loss = loss2(C.reshape(self.k1 * self.k1), _C.reshape(self.k1 * self.k1))
-            self._logger.info(" loss: " + str(loss.item()))
 
-            loss.backward(retain_graph=True)
+            # Compute loss in batches to avoid OOM
+            total_loss = 0.0
+            num_batches = 0
+            for start_idx in range(0, self.k1, batch_size):
+                end_idx = min(start_idx + batch_size, self.k1)
+                batch_pred = _C[start_idx:end_idx, :].reshape(-1)
+                batch_target = C[start_idx:end_idx, :].reshape(-1)
+                batch_loss = loss2(batch_pred, batch_target)
+                total_loss += batch_loss.item()
+                batch_loss.backward(retain_graph=True)
+                num_batches += 1
+
+                # Clear cache periodically to free up memory
+                if num_batches % 10 == 0:
+                    torch.cuda.empty_cache()
+
+            loss_value = total_loss / num_batches
+            self._logger.info(" loss: " + str(loss_value))
+
             optimizer2.step()
             optimizer2.zero_grad()
+
+            # Clear cache after each epoch
+            torch.cuda.empty_cache()
+
         return TRZ
 
     def get_data(self):
