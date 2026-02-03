@@ -319,11 +319,12 @@ class HRNRDataset(AbstractDataset):
         loss2 = torch.nn.MSELoss()
         optimizer2 = optim.Adam(RZ_GCN.parameters(), lr=1e-3)  # TODO: lr
         optimizer2.zero_grad()
-        C = torch.tensor(Utils(self.num_nodes, self.adj_matrix).get_reachable_matrix(),
-                        dtype=torch.float, device=self.device)
+        # Keep C on CPU to avoid OOM - only move batches to GPU during loss computation
+        C_reachable = Utils(self.num_nodes, self.adj_matrix).get_reachable_matrix()
         # 将频次转移矩阵转化为频率转移矩阵
         trans_matrix = self.trans_matrix / (self.trans_matrix.sum(0) + 1e-10)
-        C = C + torch.tensor(trans_matrix, dtype=torch.float, device=self.device) # 引入轨迹转移矩阵
+        # Combine matrices on CPU, then convert to tensor (still on CPU)
+        C_cpu = torch.tensor(np.array(C_reachable) + trans_matrix, dtype=torch.float)
         self._logger.info("calculating TRZ...")
 
         # Configuration for memory-efficient loss computation
@@ -347,7 +348,8 @@ class HRNRDataset(AbstractDataset):
                 _NS_batch = _NS[start_idx:end_idx, :]
                 _C_batch = _NS_batch.mm(_NS.t())
                 batch_pred = _C_batch.reshape(-1)
-                batch_target = C[start_idx:end_idx, :].reshape(-1)
+                # Move only the needed batch slice from CPU to GPU
+                batch_target = C_cpu[start_idx:end_idx, :].to(self.device).reshape(-1)
                 batch_loss = loss2(batch_pred, batch_target)
                 total_loss += batch_loss.item()
                 batch_loss.backward(retain_graph=True)
