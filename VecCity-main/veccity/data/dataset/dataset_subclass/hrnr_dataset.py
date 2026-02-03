@@ -236,9 +236,11 @@ class HRNRDataset(AbstractDataset):
         TSR = None
         self._logger.info("calculating TSR...")
 
-        # Convert adj_matrix to numpy array and symmetrize for spectral clustering
-        adj_np = np.array(self.adj_matrix)
-        adj_sym = (adj_np + adj_np.T) / 2
+        # Convert adj_matrix to sparse matrix to avoid memory issues with large matrices
+        # Use scipy.sparse for memory-efficient operations
+        adj_sparse = sparse.csr_matrix(self.adj_matrix)
+        # Symmetrize the sparse matrix
+        adj_sym_sparse = (adj_sparse + adj_sparse.T) / 2
 
         # 谱聚类 求出M1
         # Suppress sklearn warnings about graph connectivity and convergence
@@ -247,7 +249,7 @@ class HRNRDataset(AbstractDataset):
             sc = SpectralClustering(self.k2, affinity="precomputed",
                                     n_init=1, assign_labels="discretize",
                                     eigen_tol=1e-4)  # Relaxed tolerance for faster convergence
-            sc.fit(adj_sym)
+            sc.fit(adj_sym_sparse)
         labels = sc.labels_
         M1 = [[0 for i in range(self.k2)] for j in range(self.k1)]
         for i in range(self.k1):
