@@ -4,7 +4,7 @@
 # HRNR_Hyperbolic模型多城市下游任务实验脚本 (Bash版本)
 #
 # 实验设置:
-# - 5个城市数据集: prt, cd, bj, xa, df
+# - 5个城市数据集: prt, cd, bj, xa, sf
 # - 每个数据集运行5次 (不同seeds: 31, 42, 53, 64, 75)
 # - Embedding维度: 128
 #
@@ -21,7 +21,7 @@ DEVICE=${1:-"gpu"}  # 默认使用gpu
 EXP_ID=${2:-"1"}    # 默认实验ID为1
 
 # 数据集列表
-DATASETS=("prt" "cd" "bj" "xa" "df")
+DATASETS=("prt" "cd" "bj" "xa" "sf")
 
 # 随机种子列表（5次运行）
 SEEDS=(31 42 53 64 75)

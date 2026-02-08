@@ -2,7 +2,7 @@
 HRNR_Hyperbolic模型多城市下游任务实验脚本
 
 实验设置:
-- 5个城市数据集: prt, cd, bj, xa, df
+- 5个城市数据集: prt, cd, bj, xa, sf
 - 每个数据集运行5次 (不同seeds: 31, 42, 53, 64, 75)
 - Embedding维度: 128
 - 报告均值和标准差
@@ -35,8 +35,8 @@ def parse_args():
     parser.add_argument('--model', type=str, default='HRNR_Hyperbolic',
                         help='Model name (default: HRNR_Hyperbolic)')
     parser.add_argument('--datasets', type=str, nargs='+',
-                        default=['prt', 'cd', 'bj', 'xa', 'df'],
-                        help='Datasets to evaluate (default: prt cd bj xa df)')
+                        default=['prt', 'cd', 'bj', 'xa', 'sf'],
+                        help='Datasets to evaluate (default: prt cd bj xa sf)')
     parser.add_argument('--seeds', type=int, nargs='+',
                         default=[31, 42, 53, 64, 75],
                         help='Random seeds for multiple runs (default: 31 42 53 64 75)')

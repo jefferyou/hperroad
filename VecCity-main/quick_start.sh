@@ -6,7 +6,7 @@
 # 这个脚本会自动：
 # 1. 检查环境和依赖
 # 2. 验证embeddings文件
-# 3. 运行实验
+# 3. 运行实验（5个城市：prt, cd, bj, xa, sf）
 # 4. 分析结果
 #
 # 使用方法:
@@ -57,7 +57,7 @@ HRNR_Hyperbolic 快速启动脚本
 选项:
     --help              显示此帮助信息
     --device <device>   指定设备 (cpu/gpu, 默认: gpu)
-    --datasets <list>   指定数据集列表 (默认: prt cd bj xa df)
+    --datasets <list>   指定数据集列表 (默认: prt cd bj xa sf)
     --seeds <list>      指定随机种子列表 (默认: 31 42 53 64 75)
     --skip-check        跳过环境检查
     --skip-analysis     跳过结果分析
@@ -81,7 +81,7 @@ EOF
 
 # 解析命令行参数
 DEVICE="gpu"
-DATASETS="prt cd bj xa df"
+DATASETS="prt cd bj xa sf"
 SEEDS="31 42 53 64 75"
 SKIP_CHECK=false
 SKIP_ANALYSIS=false
