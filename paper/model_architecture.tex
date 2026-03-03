@@ -1,0 +1,385 @@
+% =============================================================================
+% Model Architecture Section — HHRoad
+% Hyperbolic Hierarchical Road Network Representation Learning
+% =============================================================================
+
+\section{Methodology}\label{sec:method}
+
+In this section, we present HHRoad, a hyperbolic hierarchical road network representation learning framework.
+We first introduce the Lorentz hyperbolic space and its key operations (\S\ref{subsec:prelim}),
+then describe the complete model pipeline:
+from raw road features to Euclidean embeddings (\S\ref{subsec:feat_embed}),
+from Euclidean space to the Lorentz manifold (\S\ref{subsec:hyp_proj}),
+through tangent-space graph convolution (\S\ref{subsec:hyp_gcn}),
+hierarchical message passing (\S\ref{subsec:hier_mp}),
+and finally the learning objectives that jointly enforce entailment constraints and contrastive alignment (\S\ref{subsec:loss}).
+Figure~\ref{fig:architecture} illustrates the overall architecture.
+
+% -------------------------------------------------------
+\subsection{Lorentz Hyperbolic Space}\label{subsec:prelim}
+% -------------------------------------------------------
+
+Road networks exhibit natural hierarchical structures:
+individual road \emph{segments} compose \emph{localities} (functional clusters),
+which in turn form higher-level \emph{regions} (administrative zones).
+Euclidean space distorts such tree-like hierarchies because the volume of a Euclidean ball grows only polynomially with its radius,
+whereas hyperbolic space grows \emph{exponentially}, thereby providing ample capacity to embed hierarchies with low distortion~\cite{nickel2017poincare,ganea2018hyperbolic}.
+
+We adopt the \textbf{Lorentz model} (also known as the hyperboloid model) of $d$-dimensional hyperbolic space.
+The Lorentz manifold $\mathbb{H}^d$ is defined as
+\begin{equation}\label{eq:lorentz_def}
+  \mathbb{H}^{d} = \bigl\{\, \mathbf{x} = (x_0, x_1, \dots, x_d) \in \mathbb{R}^{d+1}
+  \;\big|\; \langle \mathbf{x}, \mathbf{x} \rangle_{\mathcal{L}} = -1,\; x_0 > 0 \,\bigr\},
+\end{equation}
+where the \textbf{Minkowski inner product} is
+\begin{equation}\label{eq:minkowski}
+  \langle \mathbf{x}, \mathbf{y} \rangle_{\mathcal{L}}
+  = -x_0 y_0 + \sum_{i=1}^{d} x_i y_i.
+\end{equation}
+The \textbf{geodesic distance} between two points $\mathbf{x}, \mathbf{y} \in \mathbb{H}^d$ is
+\begin{equation}\label{eq:lorentz_dist}
+  d_{\mathbb{H}}(\mathbf{x}, \mathbf{y})
+  = \operatorname{arcosh}\!\bigl(-\langle \mathbf{x}, \mathbf{y} \rangle_{\mathcal{L}}\bigr).
+\end{equation}
+The \textbf{origin} of the Lorentz model is $\mathbf{o} = (1, 0, \dots, 0) \in \mathbb{H}^d$.
+At any point $\mathbf{x} \in \mathbb{H}^d$, the \textbf{tangent space} $\mathcal{T}_{\mathbf{x}}\mathbb{H}^d$ consists of all vectors $\mathbf{v} \in \mathbb{R}^{d+1}$ satisfying $\langle \mathbf{x}, \mathbf{v} \rangle_{\mathcal{L}} = 0$.
+Moving between the tangent space and the manifold is accomplished via the \textbf{exponential map} and the \textbf{logarithmic map}:
+\begin{align}
+  \exp_{\mathbf{x}}(\mathbf{v})
+  &= \cosh\!\bigl(\|\mathbf{v}\|_{\mathcal{L}}\bigr)\,\mathbf{x}
+     + \sinh\!\bigl(\|\mathbf{v}\|_{\mathcal{L}}\bigr)\,
+       \frac{\mathbf{v}}{\|\mathbf{v}\|_{\mathcal{L}}}, \label{eq:exp_map} \\[4pt]
+  \log_{\mathbf{x}}(\mathbf{y})
+  &= \frac{d_{\mathbb{H}}(\mathbf{x},\mathbf{y})}
+          {\sinh\!\bigl(d_{\mathbb{H}}(\mathbf{x},\mathbf{y})\bigr)}\,
+     \bigl(\mathbf{y} + \langle \mathbf{x}, \mathbf{y} \rangle_{\mathcal{L}}\,\mathbf{x}\bigr),
+  \label{eq:log_map}
+\end{align}
+where $\|\mathbf{v}\|_{\mathcal{L}} = \sqrt{\langle \mathbf{v}, \mathbf{v} \rangle_{\mathcal{L}}}$ denotes the Lorentzian norm of a tangent vector.
+These two maps are central to every subsequent component, as they allow us to perform efficient linear operations in the tangent space while preserving the geometric properties of hyperbolic space.
+
+% -------------------------------------------------------
+\subsection{Road Feature Embedding}\label{subsec:feat_embed}
+% -------------------------------------------------------
+
+We consider a road network $\mathcal{G} = (\mathcal{V}, \mathcal{E})$
+with $N = |\mathcal{V}|$ road segments and adjacency matrix $\mathbf{A} \in \{0,1\}^{N \times N}$.
+Each segment $v_i$ is described by four categorical attributes:
+node identity, road type, discretised length, and lane count.
+We embed each attribute via a learnable embedding table and concatenate the results:
+\begin{equation}\label{eq:raw_feat}
+  \mathbf{e}_i
+  = \bigl[\,
+      \mathbf{E}_{\text{node}}(v_i) \;\|\;
+      \mathbf{E}_{\text{type}}(v_i) \;\|\;
+      \mathbf{E}_{\text{len}}(v_i)  \;\|\;
+      \mathbf{E}_{\text{lane}}(v_i)
+    \,\bigr]
+  \;\in\; \mathbb{R}^{D_e},
+\end{equation}
+where $\|$ denotes concatenation and $D_e = d_{\text{node}} + d_{\text{type}} + d_{\text{len}} + d_{\text{lane}}$ is the total Euclidean feature dimension.
+We further assume two \emph{assignment matrices} are given: a \textbf{structural assignment} $\mathbf{S} \in \mathbb{R}^{N \times M}$
+mapping segments to $M$ localities (obtained via spectral clustering on the topology), and a \textbf{functional assignment} $\mathbf{F} \in \mathbb{R}^{M \times R}$
+mapping localities to $R$ regions (obtained via trajectory-data augmented clustering).
+These assignments define the three-level hierarchy:
+\emph{Segment} $\rightarrow$ \emph{Locality} $\rightarrow$ \emph{Region}.
+
+% -------------------------------------------------------
+\subsection{Projection to the Lorentz Manifold}\label{subsec:hyp_proj}
+% -------------------------------------------------------
+
+To operate in hyperbolic space, we project the Euclidean features $\{\mathbf{e}_i\}_{i=1}^N$ onto the Lorentz manifold $\mathbb{H}^d$ via a learnable linear transformation followed by Lorentz projection.
+Specifically, for each segment $v_i$:
+\begin{align}
+  \mathbf{z}_i &= \mathbf{W}_p\,\mathbf{e}_i + \mathbf{b}_p
+    \;\in\; \mathbb{R}^{d}, \label{eq:linear_proj}\\[4pt]
+  \mathbf{h}_i^{(0)} &= \pi_{\mathbb{H}}(\mathbf{z}_i)
+    = \Bigl(\sqrt{1 + \|\mathbf{z}_i\|^2},\; \mathbf{z}_i\Bigr)
+    \;\in\; \mathbb{H}^{d}, \label{eq:lorentz_proj}
+\end{align}
+where $\mathbf{W}_p \in \mathbb{R}^{d \times D_e}$, $\mathbf{b}_p \in \mathbb{R}^{d}$ are learnable parameters, and $\pi_{\mathbb{H}}$ prepends the time component $x_0 = \sqrt{1 + \|\mathbf{z}_i\|^2}$ so that the resulting $(d{+}1)$-dimensional vector satisfies the Lorentz constraint $\langle \mathbf{h}_i^{(0)}, \mathbf{h}_i^{(0)} \rangle_{\mathcal{L}} = -1$.
+This gives us the initial hyperbolic representations $\mathbf{H}^{(0)} = \{\mathbf{h}_1^{(0)}, \dots, \mathbf{h}_N^{(0)}\} \subset \mathbb{H}^d$ for all segments.
+
+% -------------------------------------------------------
+\subsection{Hyperbolic Graph Convolution}\label{subsec:hyp_gcn}
+% -------------------------------------------------------
+
+Standard graph convolution cannot be directly applied in hyperbolic space because the manifold is non-linear.
+We adopt a \textbf{tangent-space strategy}~\cite{chami2019hyperbolic}:
+map features to the tangent space at the origin $\mathbf{o}$, perform linear neighbourhood aggregation there, and then map the result back to the manifold.
+Concretely, given hyperbolic node features $\mathbf{H} = \{\mathbf{h}_i\}_{i=1}^N \subset \mathbb{H}^d$ and adjacency $\mathbf{A}$, a single \textbf{Hyperbolic Graph Convolution} (HGC) layer operates as follows:
+
+\paragraph{Step 1: Map to tangent space.}
+For each node $i$, extract the spatial component $\mathbf{h}_i^s = (h_{i,1}, \dots, h_{i,d})$ and compute the tangent-space representation via the logarithmic map at the origin:
+\begin{equation}\label{eq:log_zero}
+  \tilde{\mathbf{h}}_i
+  = \log_{\mathbf{o}}^{0}(\mathbf{h}_i^s)
+  = \frac{\operatorname{artanh}(\|\mathbf{h}_i^s\|)}{\|\mathbf{h}_i^s\|}\,\mathbf{h}_i^s
+  \;\in\; \mathbb{R}^{d}.
+\end{equation}
+
+\paragraph{Step 2: Neighbourhood aggregation.}
+Aggregate neighbour features using degree-normalised message passing:
+\begin{equation}\label{eq:agg}
+  \bar{\mathbf{h}}_i
+  = \sum_{j \in \mathcal{N}(i)} \frac{A_{ij}}{\deg(i)}\,\tilde{\mathbf{h}}_j
+  \;\in\; \mathbb{R}^{d},
+\end{equation}
+where $\mathcal{N}(i) = \{j : A_{ij} > 0\}$ and $\deg(i) = \sum_j A_{ij}$.
+This aggregation is an Euclidean operation in the tangent space, hence efficient and numerically stable.
+
+\paragraph{Step 3: Linear transformation.}
+Apply a learnable weight matrix and bias:
+\begin{equation}\label{eq:tangent_linear}
+  \hat{\mathbf{h}}_i = \mathbf{W}\,\bar{\mathbf{h}}_i + \mathbf{b}
+  \;\in\; \mathbb{R}^{d},
+\end{equation}
+with $\mathbf{W} \in \mathbb{R}^{d \times d}$ and $\mathbf{b} \in \mathbb{R}^d$.
+
+\paragraph{Step 4: Map back to the manifold.}
+Apply the exponential map at the origin to return the transformed features to hyperbolic space, and re-project to guarantee the Lorentz constraint:
+\begin{align}
+  \hat{\mathbf{h}}_i^{s}
+  &= \exp_{\mathbf{o}}^{0}(\hat{\mathbf{h}}_i)
+   = \frac{\tanh(\|\hat{\mathbf{h}}_i\|)}{\|\hat{\mathbf{h}}_i\|}\,\hat{\mathbf{h}}_i
+  \;\in\; \mathbb{R}^{d}, \label{eq:exp_zero}\\[4pt]
+  \mathbf{h}_i'
+  &= \pi_{\mathbb{H}}\!\bigl(\hat{\mathbf{h}}_i^{s}\bigr)
+  \;\in\; \mathbb{H}^{d}. \label{eq:reproj}
+\end{align}
+We denote one full pass of Eqs.~\eqref{eq:log_zero}--\eqref{eq:reproj} as $\operatorname{HGC}(\mathbf{H}, \mathbf{A})$.
+
+% -------------------------------------------------------
+\subsection{Hierarchical Hyperbolic Message Passing}\label{subsec:hier_mp}
+% -------------------------------------------------------
+
+A single HGC layer captures only local neighbourhood information.
+To propagate information across the three-level hierarchy, we design a \textbf{Hierarchical Hyperbolic Message Passing} (HHMP) module
+that first aggregates representations \emph{bottom-up} from segments to localities and regions,
+and then distributes global context \emph{top-down} back to segments.
+Two HHMP layers are stacked to produce the final representations.
+
+\subsubsection{Bottom-Up Aggregation}\label{subsubsec:bottom_up}
+
+Given segment-level hyperbolic embeddings $\mathbf{H}^{\text{seg}} = \{\mathbf{h}_i\}_{i=1}^N \subset \mathbb{H}^d$, we compute locality-level and region-level embeddings
+by performing weighted Fréchet means in the tangent space at the origin.
+
+\paragraph{Segment $\to$ Locality.}
+Let $\hat{\mathbf{S}} \in \mathbb{R}^{N \times M}$ be the column-normalised structural assignment matrix.
+For each locality $\ell \in \{1, \dots, M\}$:
+\begin{align}
+  \tilde{\mathbf{h}}_i &= \log_{\mathbf{o}}(\mathbf{h}_i),\quad i = 1, \dots, N, \label{eq:seg_to_tangent}\\[3pt]
+  \bar{\mathbf{t}}_\ell &= \sum_{i=1}^{N} \hat{S}_{i\ell}\,\tilde{\mathbf{h}}_i, \label{eq:tangent_mean_loc}\\[3pt]
+  \mathbf{h}_\ell^{\text{loc}} &= \pi_{\mathbb{H}}\!\Bigl(
+    \rho \cdot \frac{\|\bar{\mathbf{t}}_\ell^s\|}{\|\exp_{\mathbf{o}}(\bar{\mathbf{t}}_\ell)^s\|}
+    \cdot \exp_{\mathbf{o}}(\bar{\mathbf{t}}_\ell)^s
+  \Bigr), \label{eq:loc_emb}
+\end{align}
+where the superscript $s$ extracts the spatial component and $\rho \in (0,1]$ is a \textbf{norm-preservation factor} (set to $0.8$) that re-scales the spatial norm after aggregation.
+This rescaling is critical:
+because the Fréchet mean in negatively-curved space contracts towards the origin, directly averaging in the tangent space would cause the locality embedding to collapse near $\mathbf{o}$.
+By retaining a fraction $\rho$ of the expected spatial norm, we preserve representational capacity while still allowing a controlled norm reduction that reflects the coarser granularity of localities.
+
+\paragraph{Locality $\to$ Region.}
+The same procedure is applied to the locality embeddings $\mathbf{H}^{\text{loc}}$ using the functional assignment $\hat{\mathbf{F}}$, yielding region embeddings $\mathbf{H}^{\text{reg}} = \{\mathbf{h}_r^{\text{reg}}\}_{r=1}^R \subset \mathbb{H}^d$.
+
+\subsubsection{Top-Down Message Passing}\label{subsubsec:top_down}
+
+After obtaining multi-scale representations, context is propagated downward through five sequential stages,
+mirroring the nomenclature of the original HRNR~\cite{hrnr}:
+
+\paragraph{(i) Region-to-Region (F2F).}
+We first enrich region representations by exchanging messages among regions.
+A hyperbolic affinity matrix is constructed by
+\begin{equation}\label{eq:region_affinity}
+  \alpha_{r r'} = \exp\!\bigl(-d_{\mathbb{H}}(\mathbf{h}_r^{\text{reg}}, \mathbf{h}_{r'}^{\text{reg}})\bigr),
+\end{equation}
+and the region embeddings are updated via an HGC layer:
+\begin{equation}\label{eq:f2f}
+  \mathbf{H}^{\text{reg}} \leftarrow \operatorname{HGC}_{\text{reg}}\!\bigl(\mathbf{H}^{\text{reg}},\, \boldsymbol{\alpha} + \mathbf{I}\bigr).
+\end{equation}
+
+\paragraph{(ii) Region-to-Locality (F2C).}
+Region-level context is distributed to each locality by the inverse of the tangent-space aggregation.
+For locality $\ell$, the region message is computed as
+\begin{equation}\label{eq:f2c}
+  \mathbf{m}_\ell^{\text{reg}}
+  = \pi_{\mathbb{H}}\!\Biggl(
+      \rho' \cdot \exp_{\mathbf{o}}\!\Bigl(
+        \sum_{r=1}^{R} \frac{F_{\ell r}}{\sum_{r'} F_{\ell r'}}\;
+        \log_{\mathbf{o}}\!\bigl(\mathbf{h}_r^{\text{reg}}\bigr)
+      \Bigr)^s
+    \Biggr),
+\end{equation}
+where $\rho' = 0.9$ is a higher norm-preservation rate for top-down distribution (since coarse-grained information should be preserved more faithfully when mapped to finer granularity).
+The locality embedding is then updated via a \textbf{gated hyperbolic interpolation}:
+\begin{equation}\label{eq:gate_loc}
+  \mathbf{h}_\ell^{\text{loc}}
+  \leftarrow \exp_{\mathbf{h}_\ell^{\text{loc}}}\!\Bigl(
+    g_\ell \cdot \log_{\mathbf{h}_\ell^{\text{loc}}}\!\bigl(\mathbf{m}_\ell^{\text{reg}}\bigr)
+  \Bigr),
+\end{equation}
+where $g_\ell = \sigma\!\bigl(\mathbf{w}_c^\top [\mathbf{h}_\ell^{\text{loc}} \| \mathbf{m}_\ell^{\text{reg}}] + b_c\bigr) \in (0,1)$ is a learned gate
+that controls how much region-level information is incorporated.
+Intuitively, the logarithmic map $\log_{\mathbf{h}_\ell^{\text{loc}}}(\mathbf{m}_\ell^{\text{reg}})$ computes a tangent direction from the current locality embedding towards the region message,
+the gate $g_\ell$ scales this direction,
+and the exponential map moves along the geodesic by the scaled amount.
+
+\paragraph{(iii) Locality-to-Locality (C2C).}
+Updated locality embeddings exchange messages within a pre-computed structural adjacency $\mathbf{A}^{\text{loc}}$:
+\begin{equation}\label{eq:c2c}
+  \mathbf{H}^{\text{loc}} \leftarrow \operatorname{HGC}_{\text{loc}}\!\bigl(\mathbf{H}^{\text{loc}},\, \mathbf{A}^{\text{loc}}\bigr).
+\end{equation}
+
+\paragraph{(iv) Locality-to-Segment (C2N).}
+Locality context is distributed to individual segments analogously to Eq.~\eqref{eq:f2c}, using the structural assignment $\mathbf{S}$ and a segment-level gate:
+\begin{equation}\label{eq:c2n_msg}
+  \mathbf{m}_i^{\text{loc}}
+  = \pi_{\mathbb{H}}\!\Biggl(
+      \rho' \cdot \exp_{\mathbf{o}}\!\Bigl(
+        \sum_{\ell=1}^{M} \frac{S_{i\ell}}{\sum_{\ell'} S_{i\ell'}}\;
+        \log_{\mathbf{o}}\!\bigl(\mathbf{h}_\ell^{\text{loc}}\bigr)
+      \Bigr)^s
+    \Biggr),
+\end{equation}
+\begin{equation}\label{eq:gate_seg}
+  \mathbf{h}_i
+  \leftarrow \exp_{\mathbf{h}_i}\!\Bigl(
+    g_i \cdot \log_{\mathbf{h}_i}\!\bigl(\mathbf{m}_i^{\text{loc}}\bigr)
+  \Bigr),
+\end{equation}
+with $g_i = \sigma\!\bigl(\mathbf{w}_s^\top [\mathbf{h}_i \| \mathbf{m}_i^{\text{loc}}] + b_s\bigr)$.
+
+\paragraph{(v) Segment-to-Segment (N2N).}
+Finally, segment embeddings are refined by local topology:
+\begin{equation}\label{eq:n2n}
+  \mathbf{H}^{\text{seg}} \leftarrow \operatorname{HGC}_{\text{seg}}\!\bigl(\mathbf{H}^{\text{seg}},\, \mathbf{A}\bigr).
+\end{equation}
+
+After passing through two stacked HHMP layers, we denote the resulting segment embeddings as
+$\mathbf{H}^{\text{seg}} = \{\mathbf{h}_i\}_{i=1}^{N}$,
+locality embeddings as $\mathbf{H}^{\text{loc}} = \{\mathbf{h}_\ell^{\text{loc}}\}_{\ell=1}^{M}$,
+and region embeddings as $\mathbf{H}^{\text{reg}} = \{\mathbf{h}_r^{\text{reg}}\}_{r=1}^{R}$.
+
+\subsubsection{Output Representation}\label{subsubsec:output}
+
+The final road-segment representation is obtained by concatenating the initial hyperbolic features $\mathbf{h}_i^{(0)}$ with the refined segment embedding $\mathbf{h}_i$,
+and projecting back to a $D_o$-dimensional Euclidean vector via a linear layer:
+\begin{equation}\label{eq:output}
+  \mathbf{r}_i = \mathbf{W}_o\,[\mathbf{h}_i^{(0)} \| \mathbf{h}_i] + \mathbf{b}_o
+  \;\in\; \mathbb{R}^{D_o},
+\end{equation}
+where $\mathbf{W}_o \in \mathbb{R}^{D_o \times 2(d+1)}$ and $\mathbf{b}_o \in \mathbb{R}^{D_o}$.
+This Euclidean output can be fed to any downstream task head.
+
+% -------------------------------------------------------
+\subsection{Learning Objectives}\label{subsec:loss}
+% -------------------------------------------------------
+
+Training is driven by three complementary objectives.
+
+\subsubsection{Road Function Classification Loss}\label{subsubsec:cls_loss}
+
+Following HRNR, we use a road-function classification task as the primary supervision signal.
+Given the output representation $\mathbf{r}_i$ from Eq.~\eqref{eq:output},
+the classification loss is the standard cross-entropy:
+\begin{equation}\label{eq:loss_cls}
+  \mathcal{L}_{\text{cls}}
+  = -\frac{1}{|\mathcal{B}|} \sum_{i \in \mathcal{B}}
+    \log \frac{\exp(\mathbf{r}_i^\top \mathbf{w}_{y_i})}
+         {\sum_{c=1}^{C} \exp(\mathbf{r}_i^\top \mathbf{w}_{c})},
+\end{equation}
+where $\mathcal{B}$ is the training batch and $y_i$ is the ground-truth label of segment $v_i$.
+
+\subsubsection{Entailment Cone Loss}\label{subsubsec:entail_loss}
+
+To explicitly encode hierarchical containment in hyperbolic space,
+we introduce \textbf{entailment cones}~\cite{ganea2018hyperbolic,pal2024hycoclip}.
+At any point $\mathbf{x} \in \mathbb{H}^d$, an entailment cone is defined by a half-aperture angle
+\begin{equation}\label{eq:aperture}
+  \theta(\mathbf{x})
+  = 2\arcsin\!\Bigl(\frac{1}{\cosh\bigl(d_{\mathbb{H}}(\mathbf{x}, \mathbf{o})\bigr)}\Bigr).
+\end{equation}
+Points closer to the origin $\mathbf{o}$ have a wider aperture and thus can ``entail'' (contain) more child concepts;
+points farther from the origin are more specific and have a narrower aperture.
+Given a parent point $\mathbf{x}$ and a candidate child point $\mathbf{y}$,
+we compute the angle between them as
+\begin{equation}\label{eq:angle}
+  \phi(\mathbf{x}, \mathbf{y})
+  = \arccos\!\Biggl(
+    \frac{\langle \mathbf{x}, \mathbf{y} \rangle_{\mathcal{L}}}
+         {\|\mathbf{x}\|_{\mathcal{L}} \cdot \|\mathbf{y}\|_{\mathcal{L}}}
+    \Biggr),
+\end{equation}
+and define the \textbf{entailment score}:
+\begin{equation}\label{eq:entail_score}
+  s(\mathbf{x}, \mathbf{y}) = \theta(\mathbf{x}) - \phi(\mathbf{x}, \mathbf{y}).
+\end{equation}
+A positive score indicates that $\mathbf{y}$ falls inside the entailment cone of $\mathbf{x}$, i.e., $\mathbf{x}$ entails $\mathbf{y}$.
+
+We enforce three types of entailment relations mirroring the road-network hierarchy:
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Region $\Rightarrow$ Locality}:
+    for every region $r$ and locality $\ell$ assigned to $r$;
+  \item \textbf{Locality $\Rightarrow$ Segment}:
+    for every locality $\ell$ and segment $i$ assigned to $\ell$;
+  \item \textbf{Segment $\Leftrightarrow$ Segment}:
+    for every pair of topologically adjacent segments $(i,j) \in \mathcal{E}$.
+\end{enumerate}
+The entailment loss penalises violations via a hinge function:
+\begin{equation}\label{eq:loss_ce}
+  \mathcal{L}_{\text{ent}}
+  = \frac{1}{|\mathcal{P}|}
+    \sum_{(\mathbf{x},\mathbf{y}) \in \mathcal{P}}
+    \operatorname{ReLU}\!\bigl(-s(\mathbf{x}, \mathbf{y})\bigr),
+\end{equation}
+where $\mathcal{P}$ is the set of all parent--child pairs sampled from the three types above.
+
+\subsubsection{Hierarchical Contrastive Loss}\label{subsubsec:contrast_loss}
+
+To further sharpen the embeddings, we apply contrastive learning at two granularities.
+
+\paragraph{Segment-level contrastive learning.}
+For each sampled edge $(i,j) \in \mathcal{E}$, the anchor is segment $i$ and its positive is the adjacent segment $j$.
+We draw $K$ negative segments uniformly at random.
+The similarity is defined as the negated Lorentz distance, and the loss follows the InfoNCE formulation:
+\begin{equation}\label{eq:loss_seg_cl}
+  \mathcal{L}_{\text{seg}}
+  = -\frac{1}{|\mathcal{E}_s|}
+    \sum_{(i,j) \in \mathcal{E}_s}
+    \log \frac{
+      \exp\!\bigl(-d_{\mathbb{H}}(\mathbf{h}_i, \mathbf{h}_j) / \tau\bigr)
+    }{
+      \exp\!\bigl(-d_{\mathbb{H}}(\mathbf{h}_i, \mathbf{h}_j) / \tau\bigr)
+      + \sum_{k=1}^{K} \exp\!\bigl(-d_{\mathbb{H}}(\mathbf{h}_i, \mathbf{h}_{n_k}) / \tau\bigr)
+    },
+\end{equation}
+where $\mathcal{E}_s$ is a sampled subset of edges, $\{n_k\}_{k=1}^K$ are negative samples, and $\tau$ is the temperature.
+
+\paragraph{Cross-level contrastive learning.}
+For each locality $\ell$, we pair it with a randomly chosen member segment $i \in \ell$ (positive) and $K$ random segments (negatives):
+\begin{equation}\label{eq:loss_cross_cl}
+  \mathcal{L}_{\text{cross}}
+  = -\frac{1}{|\mathcal{L}_c|}
+    \sum_{(\ell, i) \in \mathcal{L}_c}
+    \log \frac{
+      \exp\!\bigl(-d_{\mathbb{H}}(\mathbf{h}_\ell^{\text{loc}}, \mathbf{h}_i) / \tau\bigr)
+    }{
+      \exp\!\bigl(-d_{\mathbb{H}}(\mathbf{h}_\ell^{\text{loc}}, \mathbf{h}_i) / \tau\bigr)
+      + \sum_{k=1}^{K} \exp\!\bigl(-d_{\mathbb{H}}(\mathbf{h}_\ell^{\text{loc}}, \mathbf{h}_{n_k}) / \tau\bigr)
+    }.
+\end{equation}
+
+The combined contrastive loss is $\mathcal{L}_{\text{con}} = \mathcal{L}_{\text{seg}} + \mathcal{L}_{\text{cross}}$.
+
+\subsubsection{Total Training Objective}\label{subsubsec:total_loss}
+
+The overall loss is a weighted sum of all three components:
+\begin{equation}\label{eq:total_loss}
+  \mathcal{L}
+  = \mathcal{L}_{\text{cls}}
+  + \lambda_1\,\mathcal{L}_{\text{ent}}
+  + \lambda_2\,\mathcal{L}_{\text{con}},
+\end{equation}
+where $\lambda_1$ and $\lambda_2$ balance the contributions of the entailment and contrastive objectives, respectively.
+The entire model is trained end-to-end with the Adam optimiser and gradient clipping to prevent numerical instability inherent in hyperbolic operations.
