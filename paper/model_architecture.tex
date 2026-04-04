@@ -78,11 +78,33 @@ We embed each attribute via a learnable embedding table and concatenate the resu
   \;\in\; \mathbb{R}^{D_e},
 \end{equation}
 where $\|$ denotes concatenation and $D_e = d_{\text{node}} + d_{\text{type}} + d_{\text{len}} + d_{\text{lane}}$ is the total Euclidean feature dimension.
-We further assume two \emph{assignment matrices} are given: a \textbf{structural assignment} $\mathbf{S} \in \mathbb{R}^{N \times M}$
-mapping segments to $M$ localities (obtained via spectral clustering on the topology), and a \textbf{functional assignment} $\mathbf{F} \in \mathbb{R}^{M \times R}$
-mapping localities to $R$ regions (obtained via trajectory-data augmented clustering).
-These assignments define the three-level hierarchy:
-\emph{Segment} $\rightarrow$ \emph{Locality} $\rightarrow$ \emph{Region}.
+The three-level hierarchy (\emph{Segment} $\rightarrow$ \emph{Locality} $\rightarrow$ \emph{Region}) is defined by two \emph{assignment matrices} that are \textbf{pre-computed once before model training and held fixed} throughout optimisation:
+
+\paragraph{Structural assignment $\mathbf{S} \in \mathbb{R}^{N \times M}$.}
+We first apply spectral clustering on the symmetrised adjacency $(\mathbf{A} + \mathbf{A}^\top)/2$ to partition the $N$ segments into $M$ localities, yielding a hard one-hot assignment $\mathbf{M}_1 \in \{0,1\}^{N \times M}$.
+A Graph Attention Network (GAT) is then trained for 300 epochs to refine this assignment into a soft matrix by minimising a graph reconstruction loss:
+\begin{equation}\label{eq:struct_assign}
+  \mathbf{S} = \operatorname{softmax}\!\bigl(\operatorname{GAT}(\mathbf{X}_{\text{seg}},\, \mathbf{A}) \odot \mathbf{M}_1\bigr),
+\end{equation}
+where the element-wise product $\odot \mathbf{M}_1$ preserves the spectral-clustering topology and the softmax normalises column-wise.
+After pre-computation, $\mathbf{S}$ is detached from the computation graph and cached.
+
+\paragraph{Functional assignment $\mathbf{F} \in \mathbb{R}^{M \times R}$.}
+The locality-to-region assignment leverages trajectory co-occurrence to capture functional similarity.
+We construct a transition-frequency matrix $\mathbf{T} \in \mathbb{R}^{N \times N}$ by counting transitions within a sliding window of length $L{=}5$ over all trajectories, and combine it with a $k$-hop reachability matrix $\mathbf{C}$ to form the target $\hat{\mathbf{C}} = \mathbf{C} + \mathbf{T}$.
+A GCN is trained for 300 epochs to produce:
+\begin{equation}\label{eq:fnc_assign}
+  \mathbf{F} = \operatorname{softmax}\!\bigl(\operatorname{GCN}(\mathbf{X}_{\text{loc}},\, \mathbf{A}^{\text{loc}})\bigr),
+\end{equation}
+minimising $\|\mathbf{F}\,\mathbf{F}^\top - \hat{\mathbf{C}}\|_F^2$ so that localities sharing trajectory flows are grouped into the same region.
+Like $\mathbf{S}$, $\mathbf{F}$ is detached and cached after pre-computation.
+
+\medskip
+\noindent
+\textbf{Remark.}
+Both $\mathbf{S}$ and $\mathbf{F}$ are \emph{not} updated during model training: they carry no gradient and serve as fixed structural priors.
+This design avoids the instability that would arise from jointly learning the hierarchy and the hyperbolic representations,
+and ensures that the entailment constraints (\S\ref{subsubsec:entail_loss}) operate on a consistent hierarchical partition from the first training step.
 
 % -------------------------------------------------------
 \subsection{Projection to the Lorentz Manifold}\label{subsec:hyp_proj}
@@ -278,18 +300,25 @@ This Euclidean output can be fed to any downstream task head.
 
 Training is driven by three complementary objectives.
 
-\subsubsection{Road Function Classification Loss}\label{subsubsec:cls_loss}
+\subsubsection{Road Structure Classification Loss}\label{subsubsec:cls_loss}
 
-Following HRNR, we use a road-function classification task as the primary supervision signal.
+Following HRNR~\cite{hrnr}, we adopt a \textbf{bridge-road binary classification} task as the primary supervision signal during upstream representation learning.
+Each road segment $v_i$ in the \texttt{.geo} file carries a \texttt{road\_bridge} attribute indicating whether the segment is a bridge ($y_i{=}1$) or not ($y_i{=}0$).
+We construct balanced training batches by pairing each bridge segment with a randomly sampled non-bridge segment, resulting in a 1\!:\!1 positive--negative ratio.
+
 Given the output representation $\mathbf{r}_i$ from Eq.~\eqref{eq:output},
 the classification loss is the standard cross-entropy:
 \begin{equation}\label{eq:loss_cls}
   \mathcal{L}_{\text{cls}}
   = -\frac{1}{|\mathcal{B}|} \sum_{i \in \mathcal{B}}
     \log \frac{\exp(\mathbf{r}_i^\top \mathbf{w}_{y_i})}
-         {\sum_{c=1}^{C} \exp(\mathbf{r}_i^\top \mathbf{w}_{c})},
+         {\sum_{c \in \{0,1\}} \exp(\mathbf{r}_i^\top \mathbf{w}_{c})},
 \end{equation}
-where $\mathcal{B}$ is the training batch and $y_i$ is the ground-truth label of segment $v_i$.
+where $\mathcal{B}$ is the training batch.
+We emphasise that this bridge-classification objective serves solely as a \emph{pretext task} to guide representation learning;
+it is \textbf{distinct from} the three downstream evaluation tasks (ASI, TTE, STS) described in \S\ref{sec:experiments}, which use separate data splits and label sources.
+The bridge attribute is chosen because it correlates with structural properties (connectivity, road hierarchy) that are informative for general-purpose road embeddings,
+while being readily available from OpenStreetMap without additional annotation effort.
 
 \subsubsection{Entailment Cone Loss}\label{subsubsec:entail_loss}
 
@@ -333,7 +362,22 @@ The entailment loss penalises violations via a hinge function:
     \sum_{(\mathbf{x},\mathbf{y}) \in \mathcal{P}}
     \operatorname{ReLU}\!\bigl(-s(\mathbf{x}, \mathbf{y})\bigr),
 \end{equation}
-where $\mathcal{P}$ is the set of all parent--child pairs sampled from the three types above.
+where $\mathcal{P}$ is the set of parent--child pairs.
+
+\paragraph{Construction of $\mathcal{P}$.}
+Since exhaustive enumeration of all pairs is prohibitively expensive on large networks,
+we construct $\mathcal{P}$ at each training step via stratified sampling:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Region $\Rightarrow$ Locality}: all $(r, \ell)$ pairs for which $F_{\ell r} > 0$
+    are included exhaustively (typically $\sim\!R {\times} \bar{k}$ pairs, where $\bar{k}$ is the mean locality count per region);
+  \item \textbf{Locality $\Rightarrow$ Segment}: we uniformly sample $\min(50, M)$ localities,
+    and for each sampled locality $\ell$ we sample $\min(10, |\ell|)$ member segments;
+  \item \textbf{Segment $\Leftrightarrow$ Segment}: we uniformly sample $\min(1000, |\mathcal{E}|)$ edges
+    and enforce bi-directional entailment for each sampled pair.
+\end{itemize}
+Because both $\mathbf{S}$ and $\mathbf{F}$ are fixed (cf.\ \S\ref{subsec:feat_embed}),
+the parent--child membership is \emph{deterministic} throughout training---only the random subset varies per step.
+This eliminates the risk of noisy hierarchy assignments corrupting the entailment constraints during early training, a concern that would arise if $\mathbf{S}$ and $\mathbf{F}$ were jointly optimised with the model.
 
 \subsubsection{Hierarchical Contrastive Loss}\label{subsubsec:contrast_loss}
 

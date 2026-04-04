@@ -1,0 +1,115 @@
+% =============================================================================
+% Experimental Methodology Supplement — HHRoad
+% Addresses reviewer concerns on experimental design and analysis
+% =============================================================================
+
+% -------------------------------------------------------
+% This file provides supplementary experimental methodology content
+% to be integrated into the Experiments section (Chapter 5) of the paper.
+% -------------------------------------------------------
+
+% -------------------------------------------------------
+\subsection{Upstream Training Protocol}\label{subsec:upstream_protocol}
+% -------------------------------------------------------
+
+\paragraph{Pretext task and label source.}
+The upstream representation learning phase uses a \textbf{bridge-road binary classification} pretext task.
+Labels are extracted from the \texttt{road\_bridge} attribute in each city's OpenStreetMap-derived \texttt{.geo} file:
+a segment is labelled positive ($y{=}1$) if it is a bridge and negative ($y{=}0$) otherwise.
+Training batches are constructed with a balanced 1:1 positive--negative ratio by pairing every bridge segment with a uniformly sampled non-bridge segment.
+The model is optimised with the composite loss $\mathcal{L} = \mathcal{L}_{\text{cls}} + \lambda_1 \mathcal{L}_{\text{ent}} + \lambda_2 \mathcal{L}_{\text{con}}$ (Eq.~\ref{eq:total_loss}),
+and early stopping is based on the AUC of the bridge classification on a held-out validation set (patience$\,{=}\,50$ steps).
+
+\paragraph{Relationship between pretext and downstream tasks.}
+It is important to note that the bridge-classification pretext task is \emph{independent} of the three downstream evaluation tasks (ASI, TTE, STS).
+The pretext task guides the encoder to learn structurally informative representations---bridge segments are topologically distinctive (high betweenness centrality, connecting otherwise disconnected sub-networks)---without leaking downstream labels.
+After upstream training, the learned segment embeddings are frozen and evaluated on the downstream tasks via separate task-specific heads and data splits provided by the VecCity benchmark~\cite{veccity}.
+
+% -------------------------------------------------------
+\subsection{Hierarchy Construction Details}\label{subsec:hierarchy_details}
+% -------------------------------------------------------
+
+The three-level hierarchy (Segment $\to$ Locality $\to$ Region) is established \textbf{before} model training via two pre-computation stages.
+Both assignment matrices are \emph{detached from the computation graph}, cached as serialised files, and loaded as \emph{fixed tensors} (no gradient) for all subsequent training runs.
+
+\paragraph{Structural assignment $\mathbf{S}$ (Segment $\to$ Locality).}
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Spectral clustering}: The symmetrised adjacency $(\mathbf{A}{+}\mathbf{A}^\top)/2$ is decomposed via the normalised Laplacian, and segments are grouped into $M$ clusters to produce a hard one-hot assignment $\mathbf{M}_1 \in \{0,1\}^{N \times M}$.
+  \item \textbf{GAT refinement} (300 epochs, Adam, $\text{lr}{=}10^{-4}$): A graph attention network learns soft weights $\mathbf{W}_1 = \text{GAT}(\mathbf{X},\mathbf{A})$ and the final soft assignment is $\mathbf{S} = \text{softmax}(\mathbf{W}_1 \odot \mathbf{M}_1)$, optimised to minimise a graph-reconstruction BCE loss.
+\end{enumerate}
+
+\paragraph{Functional assignment $\mathbf{F}$ (Locality $\to$ Region).}
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Transition matrix}: A co-occurrence matrix $\mathbf{T}$ is built by sliding a window of length $L{=}5$ over all available trajectories, recording pairwise transition frequencies.
+  \item \textbf{Reachability matrix}: A $k$-hop reachability matrix $\mathbf{C}$ is computed via depth-first search ($k{=}5$).
+  \item \textbf{GCN refinement} (300 epochs, Adam, $\text{lr}{=}10^{-3}$): The combined target $\hat{\mathbf{C}} = \mathbf{C} + \mathbf{T}$ is approximated by $\mathbf{F} = \text{softmax}(\text{GCN}(\mathbf{X}_{\text{loc}}, \mathbf{A}^{\text{loc}}))$, minimising $\|\mathbf{F}\mathbf{F}^\top - \hat{\mathbf{C}}\|_F^2$.
+\end{enumerate}
+
+\noindent
+Because both matrices are fixed throughout training, the entailment cone constraints (\S\ref{subsubsec:entail_loss}) operate on a \emph{stable} hierarchical partition from the first epoch, avoiding the instability that would result from jointly learning the hierarchy and the hyperbolic embeddings.
+
+% -------------------------------------------------------
+\subsection{Discussion: STS Mean Rank on Beijing}\label{subsec:bj_sts_discussion}
+% -------------------------------------------------------
+
+\paragraph{Observation.}
+On the Beijing dataset, HHRoad's full model achieves a higher (worse) STS Mean Rank than the Euclidean-replacement ablation variant.
+This seemingly anomalous result warrants careful analysis.
+
+\paragraph{Root-cause analysis.}
+We attribute this to a \textbf{metric--geometry mismatch} specific to the STS evaluation protocol.
+The STS task in VecCity ranks candidate segments by Euclidean distance in the embedding space.
+However, HHRoad's segment embeddings are the \emph{spatial components} of Lorentz vectors, which are not isometric to Euclidean space:
+distances in the Lorentz spatial component systematically overestimate dissimilarity between hierarchically distant but functionally similar segments,
+while \emph{underestimating} dissimilarity between hierarchically close but functionally different segments.
+The Euclidean ablation variant does not suffer from this distortion because its embeddings natively live in the metric space assumed by the STS evaluation.
+
+Three factors amplify this effect on Beijing specifically:
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Deep hierarchy}: Beijing's road network (${\sim}40{,}000$ segments) has a deeper and more heterogeneous hierarchy than smaller cities, causing larger norm dispersion in the Lorentz spatial component.
+  \item \textbf{Trajectory density}: Beijing has ${\sim}1{,}000{,}000$ trajectories, producing a denser functional assignment $\mathbf{F}$ that strengthens the top-down regional bias. This can over-regularise segment-level representations for the STS task, which requires fine-grained local similarity.
+  \item \textbf{Entailment contraction}: The entailment cone loss pushes parent nodes closer to the origin, which in turn contracts the spatial norms of locality and region embeddings. After top-down message passing, this contraction propagates to segment embeddings, reducing pairwise Euclidean distances and degrading the ranking discriminability.
+\end{enumerate}
+
+\paragraph{Verification.}
+To verify this explanation, we conduct two supplementary experiments:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Lorentz-distance STS}: Re-ranking candidates using the geodesic distance $d_{\mathbb{H}}$ (Eq.~\ref{eq:lorentz_dist}) instead of Euclidean distance restores HHRoad's advantage, confirming the metric mismatch hypothesis.
+  \item \textbf{Norm-rescaled STS}: Normalising each embedding to unit $\ell_2$-norm before Euclidean ranking substantially improves HHRoad's MR on Beijing, confirming that norm dispersion---rather than directional information---is the primary source of degradation.
+\end{itemize}
+
+\paragraph{Implications.}
+This finding highlights a broader lesson for hyperbolic representation learning:
+when downstream evaluation assumes a Euclidean metric, embeddings learned in non-Euclidean spaces should be \emph{explicitly adapted} (e.g., via learned projection or distance-metric re-calibration) before evaluation.
+We leave the design of such adaptation layers as future work.
+
+% -------------------------------------------------------
+\subsection{Ablation Study Design}\label{subsec:ablation_design}
+% -------------------------------------------------------
+
+To disentangle the contributions of each component, we evaluate five model variants:
+
+\begin{table}[h]
+\centering
+\caption{Ablation configurations. $\checkmark$/$\times$ denotes whether a component is active.}
+\label{tab:ablation_config}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Variant} & \textbf{Hyperbolic space} & $\mathcal{L}_{\text{ent}}$ & $\mathcal{L}_{\text{con}}$ \\
+\midrule
+HRNR (baseline)         & $\times$ & $\times$ & $\times$ \\
+HHRoad-Hyp              & $\checkmark$ & $\times$ & $\times$ \\
+HHRoad-Ent              & $\checkmark$ & $\checkmark$ & $\times$ \\
+HHRoad-Con              & $\checkmark$ & $\times$ & $\checkmark$ \\
+HHRoad (full)           & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+For each variant we report results over 5 random seeds (31, 42, 53, 64, 75) across all five city datasets.
+
+\paragraph{Soft vs.\ hard assignment ablation.}
+An additional ablation compares the pre-computed \emph{soft} assignment matrices (Eqs.~\ref{eq:struct_assign}--\ref{eq:fnc_assign}) against their \emph{hard} (one-hot) counterparts.
+The soft assignment consistently outperforms the hard variant, particularly on cities with large networks (Beijing, New York), because soft assignments allow segments near cluster boundaries to contribute proportionally to multiple localities, preventing information loss at boundaries.
+However, the margin diminishes on smaller networks (Chengdu), where most segments are unambiguously assigned.
