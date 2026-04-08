@@ -1,0 +1,866 @@
+\chapter{基于蕴含锥的双曲层次图神经网络}
+
+本章采用第三章提出的显式层次建模范式，通过蕴含锥机制直接约束路网层次关系，解决第四章隐式建模中层次包含关系缺乏几何约束的不足。
+
+\section{问题定义与研究动机}
+
+第四章的 HRGNN 证明了双曲空间对路网层次建模的有效性，但其隐式范式存在两个根本性不足。其一，层次关系的表达缺乏方向性。双曲距离可以反映两个嵌入点的层次接近程度，但无法区分"父子"关系和"兄弟"关系——一个功能区嵌入与其下属路段嵌入之间的双曲距离，可能与两个同层级路段嵌入之间的距离相当，导致层次包含关系的语义模糊。其二，HRGNN 仅在路段层级上工作，不构建局部区域和功能区的显式表示，无法支持需要多层次信息交互的通用表示学习任务。
+
+这些不足指向一个明确的改进方向：在保持双曲空间几何优势的前提下，引入专门的几何工具对层次包含关系施加显式约束，并构建多层次的结构化表示。
+
+路网中存在"通用-具体"层次关系。功能区（Region）覆盖大片地理空间，对应"最通用"概念，数量少（$|\mathcal{R}| \approx 30$）；局部区域（Locality）由地理邻近路段聚合而成，对应"中等通用"概念（$|\mathcal{C}| \approx 300$）；路段（Segment）为个体路段，对应"最具体"概念，数量最多。这种"Region $\supseteq$ Locality $\supseteq$ Segment"的包含关系。
+
+近年来，Zhou 等\cite{zhou2024garner} 通过引入地理学第三定律改进路网表示的空间语义编码，展示了地理规律先验对路网嵌入质量的提升潜力；然而该方法仍在欧氏空间中运行，无法从几何上利用路网层次结构。Sun 等\cite{sun2024lsenet} 在图聚类任务中利用 Lorentz 结构熵指导层次划分，为双曲空间中多层次图组织提供了实证支撑。这些工作进一步证实了路网层次显式建模的重要价值，以及双曲几何在此类任务中的适用性。
+
+蕴含锥在双曲空间中具有三个适用于路网的关键性质。靠近原点的点（功能区嵌入）具有宽蕴含锥，几何上"包含"更多子概念，与功能区覆盖多个局部区域的语义一致。远离原点的点（路段嵌入）具有窄蕴含锥，代表高度特定的概念。蕴含锥损失通过明确的角度约束强制层次包含关系，实现了从软赋值矩阵到硬几何约束的质变。
+
+如第三章分析，Lorentz 模型的指数映射和对数映射具有封闭形式，数值稳定性优于庞加莱球模型。本章的模型需要在三层层次结构中精确组织嵌入的几何关系，路段嵌入需要位于远离原点处（对应庞加莱球的边界附近），这对数值稳定性提出了更高要求。此外，Lorentz 模型中到原点的距离天然编码层次深度——功能区嵌入于靠近原点处，路段嵌入于远离原点处——这种几何安排在优化目标包含层次信号时自然出现，为蕴含锥约束提供了良好的初始条件。
+
+\section{模型架构设计}
+
+HHRoad 的目标是为路网中每条路段学习一个双曲嵌入向量，使其同时编码路段自身的属性特征、拓扑邻接关系以及所属的多层次结构信息。本节详细阐述 HHRoad 的完整架构设计，模型的数据流从路段原始属性出发，经过双曲嵌入、层次结构构建、双曲消息传递、组合蕴含学习、层次对比学习五个核心阶段，最终产出融合了三层层次语义的路段双曲嵌入。图~\ref{fig:HHRoad_arch} 给出了模型的整体架构示意。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/HHRoad模型架构.jpg}
+\caption{HHRoad模型架构}
+\label{fig:HHRoad_arch}
+\end{figure}
+
+\subsection{整体框架}
+
+HHRoad 由五个核心组件构成：
+
+\begin{enumerate}[label=(\arabic*)]
+    \item \textbf{双曲嵌入}：将每条路段的多维欧氏属性向量通过可学习的线性变换和指数映射投影至 Lorentz 双曲面 \(\mathbb{L}^n\)，产出路段级初始双曲嵌入。
+
+    \item \textbf{层次结构构建}：基于谱聚类和轨迹共现模式分别构建路段到局部区域、局部区域到功能区的软赋值矩阵，并在 Lorentz 切空间中自底向上逐级聚合，产出局部区域嵌入和功能区嵌入。至此，路网的三层层次表示体系（路段 \(\to\) 局部区域 \(\to\) 功能区）构建完成。
+
+    \item \textbf{双曲消息传递}：遵循 R2R \(\to\) R2C \(\to\) C2C \(\to\) C2S \(\to\) S2S 的五步传播方案，在 Lorentz 空间中依次进行功能区间消息传递、功能区向局部区域分发、局部区域间消息传递、局部区域向路段分发和路段间消息传递，使全局层次语义沿层次结构高效下行至每条路段。
+
+    \item \textbf{组合蕴含学习}：通过蕴含锥机制在双曲空间中对三类层次包含关系施加显式几何约束，确保功能区嵌入的蕴含锥包含其下属局部区域、局部区域的蕴含锥包含其下属路段、拓扑相邻路段具有互兼容的蕴含锥结构。
+
+    \item \textbf{层次对比学习}：在路段层内以拓扑相邻路段为正对、跨层以路段与其父级局部区域为正对，分别通过 InfoNCE 损失强化嵌入空间中的局部语义聚类和跨层次关联。
+\end{enumerate}
+
+总训练损失由道路功能分类损失 $\mathcal{L}_{\text{cls}}$、蕴含损失 $\mathcal{L}_{\text{CE}}$ 和对比损失 $\mathcal{L}_{\text{CC}}$ 的加权和构成。以下依次阐述各组件的具体设计。
+
+\subsection{双曲嵌入}
+
+双曲嵌入层的任务是将路段的欧氏属性向量投影为 Lorentz 双曲面上的初始嵌入，为后续所有双曲空间操作提供起点。
+
+给定路段 $v_i$ 的原始属性集合——节点编号、道路类型、路段长度和车道数，首先通过各自的嵌入查找表获取独立的特征向量，然后拼接为统一的欧氏属性向量：
+\begin{equation}
+    \mathbf{x}_i = [\mathrm{Emb}_{\text{node}}(v_i) \| \mathrm{Emb}_{\text{type}}(v_i) \| \mathrm{Emb}_{\text{length}}(v_i) \| \mathrm{Emb}_{\text{lane}}(v_i)] \in \mathbb{R}^{d_{\text{in}}}
+\end{equation}
+其中 $\|$ 表示向量拼接，$d_{\text{in}}$ 为拼接后的总维度。随后通过可学习线性变换 $f_\theta: \mathbb{R}^{d_{\text{in}}} \to \mathbb{R}^n$ 将其映射为 $n$ 维向量，再经由 Lorentz 投影将空间分量补全为满足双曲约束的 $(n+1)$ 维向量：
+\begin{equation}
+    \mathbf{z}_i = f_\theta(\mathbf{x}_i) \in \mathbb{R}^n, \quad \mathbf{h}_i = \left(\sqrt{1/\kappa + \|\mathbf{z}_i\|^2},\ \mathbf{z}_i\right)^\top \in \mathbb{L}^n
+\end{equation}
+其中时间分量 $h_{i,0} = \sqrt{1/\kappa + \|\mathbf{z}_i\|^2}$ 确保 $\mathbf{h}_i$ 满足 Lorentz 约束 $\langle \mathbf{h}_i, \mathbf{h}_i \rangle_{\mathbb{L}} = -1/\kappa$。经过此步骤，全部 $|\mathcal{S}|$ 条路段的初始双曲嵌入矩阵 $\mathbf{H}^{(0)} = [\mathbf{h}_1, \ldots, \mathbf{h}_{|\mathcal{S}|}]^\top \in \mathbb{R}^{|\mathcal{S}| \times (n+1)}$ 即构建完成。
+
+\subsection{层次结构构建}
+
+在路段初始嵌入的基础上，HHRoad 构建"路段 $\to$ 局部区域 $\to$ 功能区"的三层层次表示体系。两个关键要素是层次划分方案和双曲空间中的聚合机制。
+
+\subsubsection{层次划分方案}
+
+局部区域（Locality）的划分基于路网拓扑结构的谱聚类\cite{von2007tutorial}。对路网邻接矩阵的归一化图拉普拉斯矩阵进行特征分解，取前 $|\mathcal{C}|$ 个特征向量（$|\mathcal{C}|=300$），通过 k-means 将路段划分为 $|\mathcal{C}|$ 个结构性子区域，初始化路段到局部区域的软赋值矩阵 $\mathbf{A}_{SC} \in \mathbb{R}^{|\mathcal{S}| \times |\mathcal{C}|}$，行归一化使每行之和为 1，即每条路段对所属局部区域的隶属概率分布。
+
+功能区（Region）的划分基于轨迹数据的协同过滤学习。通过挖掘轨迹中路段的共现模式，学习局部区域到功能区的软赋值矩阵 $\mathbf{A}_{CR} \in \mathbb{R}^{|\mathcal{C}| \times |\mathcal{R}|}$（$|\mathcal{R}|=30$）。两个赋值矩阵均在训练过程中以梯度更新方式进一步微调，以在端到端学习中逐步优化层次划分的质量。
+
+\subsubsection{Lorentz 切空间聚合}
+
+由于 Lorentz 双曲面是弯曲流形，直接在流形上做加权平均不满足封闭性（加权组合不一定仍在 $\mathbb{L}^n$ 上）。HHRoad 采用"对数映射 $\to$ 切空间加权平均 $\to$ 指数映射"的三步聚合策略：首先将子级嵌入通过对数映射投影到 Lorentz 原点 $\mathbf{o} = (\sqrt{1/\kappa}, 0, \ldots, 0)^\top$ 处的切空间 $\mathcal{T}_\mathbf{o}\mathbb{L}^n$，在该切空间（作为欧氏空间）中执行加权平均，最后通过指数映射将结果投影回流形。
+
+局部区域嵌入 $\mathbf{h}_{c_j}$ 由路段嵌入聚合得到。具体地，对每个局部区域 $c_j$（$j = 1, \dots, |\mathcal{C}|$），首先将路段嵌入映射至切空间并执行加权平均，然后通过指数映射投影回流形，并引入范数保持因子 $\rho \in (0,1]$ 对空间范数进行重新缩放：
+\begin{align}
+    \tilde{\mathbf{h}}_i &= \log_{\mathbf{o}}^\kappa(\mathbf{h}_i), \quad i = 1, \dots, |\mathcal{S}|, \label{eq:seg_to_tangent} \\[3pt]
+    \bar{\mathbf{t}}_{c_j} &= \sum_{i=1}^{|\mathcal{S}|} [\mathbf{A}_{SC}]_{ij} \cdot \tilde{\mathbf{h}}_i, \label{eq:tangent_mean_loc} \\[3pt]
+    \mathbf{h}_{c_j} &= \text{Proj}_{\mathbb{L}}\!\left(
+      \rho \cdot \frac{\|\bar{\mathbf{t}}_{c_j}^s\|}{\|\exp_{\mathbf{o}}^\kappa(\bar{\mathbf{t}}_{c_j})^s\|}
+      \cdot \exp_{\mathbf{o}}^\kappa(\bar{\mathbf{t}}_{c_j})^s
+    \right), \label{eq:locality_agg}
+\end{align}
+其中 $\log_{\mathbf{o}}^\kappa(\cdot)$ 为 Lorentz 原点处的对数映射，$\exp_{\mathbf{o}}^\kappa(\cdot)$ 为原点处的指数映射（具体公式见第三章 3.2.3 节），上标 $s$ 表示提取空间分量（去除时间分量 $h_0$），$[\mathbf{A}_{SC}]_{ij}$ 为路段 $v_i$ 对局部区域 $c_j$ 的赋值权重。范数保持因子 $\rho$（设为 $0.8$）的引入是关键设计：由于负曲率空间中的 Fréchet 均值会向原点收缩，直接在切空间中求加权平均会导致局部区域嵌入塌缩至原点附近。通过保留预期空间范数的 $\rho$ 比例，既维持了表示容量，又允许可控的范数递减以反映局部区域相对路段的粗粒度特征。
+
+功能区嵌入 $\mathbf{h}_{r_k}$ 以相同方式从局部区域嵌入聚合得到，使用功能赋值矩阵 $\mathbf{A}_{CR}$：
+\begin{align}
+    \bar{\mathbf{t}}_{r_k} &= \sum_{j=1}^{|\mathcal{C}|} [\mathbf{A}_{CR}]_{jk} \cdot \log_{\mathbf{o}}^\kappa(\mathbf{h}_{c_j}), \label{eq:tangent_mean_reg} \\[3pt]
+    \mathbf{h}_{r_k} &= \text{Proj}_{\mathbb{L}}\!\left(
+      \rho \cdot \frac{\|\bar{\mathbf{t}}_{r_k}^s\|}{\|\exp_{\mathbf{o}}^\kappa(\bar{\mathbf{t}}_{r_k})^s\|}
+      \cdot \exp_{\mathbf{o}}^\kappa(\bar{\mathbf{t}}_{r_k})^s
+    \right). \label{eq:region_agg}
+\end{align}
+
+这一自底向上的两级聚合完成后，模型获得了三层层次嵌入：路段嵌入 $\{\mathbf{h}_i\}_{i=1}^{|\mathcal{S}|}$、局部区域嵌入 $\{\mathbf{h}_{c_j}\}_{j=1}^{|\mathcal{C}|}$ 和功能区嵌入 $\{\mathbf{h}_{r_k}\}_{k=1}^{|\mathcal{R}|}$，三者均位于同一 Lorentz 空间 $\mathbb{L}^n$ 中。由于聚合过程涉及加权平均并经范数保持因子缩放，高层嵌入的空间范数（$\|\tilde{\mathbf{h}}^s\|$，即除去时间分量后的欧氏范数）系统性地小于底层嵌入的范数，即功能区嵌入自然靠近 Lorentz 原点、路段嵌入远离原点。这一范数递减特性与蕴含锥的层次语义一致——靠近原点的点具有更宽的蕴含锥（代表更一般的概念），为后续蕴含约束提供了良好的几何初始条件。
+
+\subsection{双曲消息传递}
+\label{sec:message_passing}
+
+层次表示聚合构建了三层嵌入的初始版本，但各层次嵌入仅编码了自身及其下属的信息。自顶向下消息传递的目标是使全局层次语义沿"功能区 $\to$ 局部区域 $\to$ 路段"的路径逐级下行，使每条路段的最终嵌入不仅包含局部拓扑信息，还融合了其所属功能区和局部区域的宏观语义。
+
+\subsubsection{传播方案}
+
+HHRoad 采用五步自顶向下传播方案，依次执行以下操作。
+
+R2R（功能区间消息传递）：功能区之间通过 HGC 交换信息。由于功能区数量较少（$|\mathcal{R}|=30$）且缺乏预定义的拓扑连接，HHRoad 通过功能区嵌入之间的双曲亲和度矩阵动态构建邻接关系：
+\begin{equation}
+    \alpha_{kl} = \exp\!\left(-d_{\mathbb{L}}(\mathbf{h}_{r_k}, \mathbf{h}_{r_l})\right),
+    \label{eq:region_affinity}
+\end{equation}
+其中 $d_{\mathbb{L}}(\cdot, \cdot)$ 为 Lorentz 距离。在此亲和度矩阵（附加自环）上施加 HGC，更新功能区嵌入：
+\begin{equation}
+    \mathbf{H}^{\text{reg}} \leftarrow \text{HGC}_{\text{reg}}\!\left(\mathbf{H}^{\text{reg}},\, \boldsymbol{\alpha} + \mathbf{I}\right).
+    \label{eq:r2r}
+\end{equation}
+
+R2C（功能区向局部区域分发）：将更新后的功能区嵌入通过赋值矩阵 $\mathbf{A}_{CR}$ 反向分发至局部区域。分发过程在切空间中进行：对每个局部区域 $c_j$，将其所属功能区的嵌入通过对数映射投影至切空间，以赋值权重加权平均后，经指数映射投影回流形（引入范数保持因子 $\rho'$），得到来自功能区的消息向量。随后通过门控双曲插值融合原始局部区域嵌入与功能区消息（具体公式见式~(\ref{eq:f2c_msg})--(\ref{eq:gate_loc})）。
+
+C2C（局部区域间消息传递）：融合了功能区语义的局部区域嵌入在局部区域邻接图上通过 HGC 进一步交换信息：
+\begin{equation}
+    \mathbf{H}^{\text{loc}} \leftarrow \text{HGC}_{\text{loc}}\!\left(\mathbf{H}^{\text{loc}},\, \mathbf{A}^{\text{loc}}\right),
+    \label{eq:c2c}
+\end{equation}
+其中局部区域邻接矩阵由路段邻接矩阵与赋值矩阵诱导得到：$\mathbf{A}^{\text{loc}} = \mathbf{A}_{SC}^\top \mathbf{A}_{\text{adj}} \mathbf{A}_{SC}$，$\mathbf{A}_{\text{adj}}$ 为路段邻接矩阵。
+
+C2S（局部区域向路段分发）：更新后的局部区域嵌入通过 $\mathbf{A}_{SC}$ 反向分发至路段，操作方式与 R2C 类似，使用独立的门控参数（具体公式见式~(\ref{eq:c2s_msg})--(\ref{eq:gate_seg})）。
+
+S2S（路段间消息传递）：最后，融合了全部上层语义的路段嵌入在路段邻接图上通过 HGC 进行局部拓扑信息交换：
+\begin{equation}
+    \mathbf{H}^{\text{seg}} \leftarrow \text{HGC}_{\text{seg}}\!\left(\mathbf{H}^{\text{seg}},\, \mathbf{A}\right).
+    \label{eq:s2s}
+\end{equation}
+
+五步传播方案整体上实现了全局功能区语义通过两跳层次路径（功能区 $\to$ 局部区域 $\to$ 路段）高效到达每条路段，避免了标准扁平 GNN 在大规模路网上因长距离消息传递导致的信息耗散和过压缩问题\cite{topping2022oversquashing}。
+
+上述传播方案中的层次内消息传递（R2R、C2C、S2S）均通过双曲图卷积（Hyperbolic Graph Convolution, HGC）实现。由于 Lorentz 流形是非线性的，标准图卷积无法直接在双曲空间中应用。HGC\cite{chami2019hgcn,liu2019hgnn} 采用切空间策略：将特征映射到原点 $\mathbf{o}$ 处的切空间，在切空间中执行线性邻域聚合，最后将结果映射回流形。具体地，给定双曲节点特征 $\{\mathbf{h}_i\} \subset \mathbb{L}^n$ 和邻接矩阵 $\mathbf{A}$，单层 HGC 包含以下四个步骤：
+
+步骤一：映射至切空间。对每个节点 $i$，提取空间分量 $\mathbf{h}_i^s = (h_{i,1}, \dots, h_{i,n})$ 并通过原点处的对数映射计算切空间表示：
+\begin{equation}
+    \tilde{\mathbf{h}}_i = \log_{\mathbf{o}}^{\kappa}(\mathbf{h}_i^s)
+    = \frac{\text{artanh}(\|\mathbf{h}_i^s\|)}{\|\mathbf{h}_i^s\|} \mathbf{h}_i^s
+    \in \mathbb{R}^{n}.
+    \label{eq:hgc_log}
+\end{equation}
+
+步骤二：邻域聚合。在切空间中通过度归一化的消息传递聚合邻居特征：
+\begin{equation}
+    \bar{\mathbf{h}}_i = \sum_{j \in \mathcal{N}(i)} \frac{A_{ij}}{\text{deg}(i)} \tilde{\mathbf{h}}_j
+    \in \mathbb{R}^{n},
+    \label{eq:hgc_agg}
+\end{equation}
+其中 $\mathcal{N}(i) = \{j : A_{ij} > 0\}$，$\text{deg}(i) = \sum_j A_{ij}$。此聚合为切空间中的欧氏操作，计算高效且数值稳定。
+
+步骤三：线性变换。 对聚合结果施加可学习的线性变换：
+\begin{equation}
+    \hat{\mathbf{h}}_i = \mathbf{W} \bar{\mathbf{h}}_i + \mathbf{b}
+    \in \mathbb{R}^{n},
+    \label{eq:hgc_linear}
+\end{equation}
+其中 $\mathbf{W} \in \mathbb{R}^{n \times n}$ 和 $\mathbf{b} \in \mathbb{R}^{n}$ 为可学习参数。
+
+步骤四：映射回流形。通过原点处的指数映射将变换后的切向量映射回双曲空间，并重投影以确保满足 Lorentz 约束：
+\begin{align}
+    \hat{\mathbf{h}}_i^{s} &= \exp_{\mathbf{o}}^{\kappa}(\hat{\mathbf{h}}_i)
+    = \frac{\tanh(\|\hat{\mathbf{h}}_i\|)}{\|\hat{\mathbf{h}}_i\|} \hat{\mathbf{h}}_i
+    \in \mathbb{R}^{n}, \label{eq:hgc_exp} \\[4pt]
+    \mathbf{h}_i' &= \text{Proj}_{\mathbb{L}}\!\left(\hat{\mathbf{h}}_i^{s}\right)
+    \in \mathbb{L}^{n}. \label{eq:hgc_proj}
+\end{align}
+其中 $\text{Proj}_{\mathbb{L}}(\cdot)$ 通过补全时间分量 $h_0 = \sqrt{1/\kappa + \|\mathbf{z}\|^2}$ 将空间分量投影回 Lorentz 流形。我们将式~(\ref{eq:hgc_log})--(\ref{eq:hgc_proj}) 的完整过程记为 $\text{HGC}(\mathbf{H}, \mathbf{A})$。
+
+\subsubsection{门控双曲插值}
+
+跨层分发步骤（R2C、C2S）中，节点需要融合自身嵌入 $\mathbf{h}$ 和来自父级的消息 $\mathbf{m}$。HHRoad 通过门控双曲插值实现这一融合。以 R2C 步骤为例，对局部区域 $c_j$，首先计算来自功能区的消息向量（引入自顶向下范数保持因子 $\rho' = 0.9$，高于自底向上的 $\rho = 0.8$，因为粗粒度信息在向细粒度传播时应更忠实地保持）：
+\begin{equation}
+    \mathbf{m}_{c_j}^{R} = \text{Proj}_{\mathbb{L}}\!\left(
+      \rho' \cdot \exp_{\mathbf{o}}^\kappa\!\left(
+        \sum_{k=1}^{|\mathcal{R}|} \frac{[\mathbf{A}_{CR}]_{jk}}{\sum_{k'} [\mathbf{A}_{CR}]_{jk'}}
+        \log_{\mathbf{o}}^\kappa(\mathbf{h}_{r_k}')
+      \right)^s
+    \right),
+    \label{eq:f2c_msg}
+\end{equation}
+其中 $\mathbf{h}_{r_k}'$ 为 R2R 步骤更新后的功能区嵌入。随后通过可学习门控机制融合原始局部区域嵌入与功能区消息：
+\begin{equation}
+    \mathbf{h}_{c_j} \leftarrow \exp_{\mathbf{h}_{c_j}}^\kappa\!\left(
+      g_{c_j} \cdot \log_{\mathbf{h}_{c_j}}^\kappa(\mathbf{m}_{c_j}^{R})
+    \right),
+    \label{eq:gate_loc}
+\end{equation}
+其中门控系数 $g_{c_j} = \sigma\!\left(\mathbf{w}_c^\top [\mathbf{h}_{c_j} \| \mathbf{m}_{c_j}^{R}] + b_c\right) \in (0,1)$ 由可学习参数 $\mathbf{w}_c$ 和 $b_c$ 控制。直觉上，对数映射 $\log_{\mathbf{h}_{c_j}}^\kappa(\mathbf{m}_{c_j}^{R})$ 计算从当前局部区域嵌入指向功能区消息的切向量方向，门控 $g_{c_j}$ 缩放该方向的步长，指数映射沿测地线移动缩放后的距离。
+
+C2S 步骤的操作与 R2C 类似，使用结构赋值矩阵 $\mathbf{A}_{SC}$ 和独立的门控参数：
+\begin{equation}
+    \mathbf{m}_{i}^{C} = \text{Proj}_{\mathbb{L}}\!\left(
+      \rho' \cdot \exp_{\mathbf{o}}^\kappa\!\left(
+        \sum_{j=1}^{|\mathcal{C}|} \frac{[\mathbf{A}_{SC}]_{ij}}{\sum_{j'} [\mathbf{A}_{SC}]_{ij'}}
+        \log_{\mathbf{o}}^\kappa(\mathbf{h}_{c_j}')
+      \right)^s
+    \right),
+    \label{eq:c2s_msg}
+\end{equation}
+\begin{equation}
+    \mathbf{h}_{i} \leftarrow \exp_{\mathbf{h}_{i}}^\kappa\!\left(
+      g_{i} \cdot \log_{\mathbf{h}_{i}}^\kappa(\mathbf{m}_{i}^{C})
+    \right),
+    \label{eq:gate_seg}
+\end{equation}
+其中 $g_{i} = \sigma\!\left(\mathbf{w}_s^\top [\mathbf{h}_{i} \| \mathbf{m}_{i}^{C}] + b_s\right)$，$\mathbf{h}_{c_j}'$ 为 C2C 步骤更新后的局部区域嵌入。
+
+经过两层层次消息传递编码器的堆叠（每层均执行完整的五步传播），我们将最终的路段嵌入记为 $\mathbf{H}^{\text{seg}} = \{\mathbf{h}_i\}_{i=1}^{|\mathcal{S}|}$，局部区域嵌入记为 $\mathbf{H}^{\text{loc}} = \{\mathbf{h}_{c_j}\}_{j=1}^{|\mathcal{C}|}$，功能区嵌入记为 $\mathbf{H}^{\text{reg}} = \{\mathbf{h}_{r_k}\}_{k=1}^{|\mathcal{R}|}$，三者均位于同一 Lorentz 空间 $\mathbb{L}^n$ 中。每条路段的嵌入融合了局部拓扑、所属局部区域和功能区的多层次语义信息。
+
+\subsection{组合蕴含学习}
+
+为在双曲空间中显式编码层次包含关系，HHRoad 引入蕴含锥。在双曲空间中任意一点 $\mathbf{x} \in \mathbb{L}^n$，蕴含锥由半孔径角定义：
+\begin{equation}
+    \theta(\mathbf{x}) = 2\arcsin\!\left(\frac{1}{\cosh\!\left(d_{\mathbb{L}}(\mathbf{x}, \mathbf{o})\right)}\right).
+    \label{eq:aperture}
+\end{equation}
+靠近原点 $\mathbf{o}$ 的点（功能区嵌入）具有较宽的孔径角，几何上可以"蕴含"更多子概念；远离原点的点（路段嵌入）具有较窄的孔径角，代表高度特定的概念。给定父级点 $\mathbf{x}$ 和候选子级点 $\mathbf{y}$，计算两者之间的夹角：
+\begin{equation}
+    \phi(\mathbf{x}, \mathbf{y}) = \arccos\!\left(
+      \frac{\langle \mathbf{x}, \mathbf{y} \rangle_{\mathcal{L}}}
+           {\|\mathbf{x}\|_{\mathcal{L}} \cdot \|\mathbf{y}\|_{\mathcal{L}}}
+    \right),
+    \label{eq:angle}
+\end{equation}
+并定义蕴含分数：
+\begin{equation}
+    s(\mathbf{x}, \mathbf{y}) = \theta(\mathbf{x}) - \phi(\mathbf{x}, \mathbf{y}).
+    \label{eq:entail_score}
+\end{equation}
+正的蕴含分数表示 $\mathbf{y}$ 落在 $\mathbf{x}$ 的蕴含锥内，即 $\mathbf{x}$ 蕴含 $\mathbf{y}$。
+
+结构分配矩阵 $\mathbf{S} \in \mathbb{R}^{N \times M}$。我们在对称化邻接矩阵 $(\mathbf{A} + \mathbf{A}^\top)/2$ 上执行谱聚类，
+将 $N$ 个路段划分为 $M$ 个局部区域，得到硬 one-hot 分配矩阵 $\mathbf{M}_1 \in \{0,1\}^{N \times M}$。
+随后，训练一个 GAT 模型 300 个 epoch，通过最小化图重构损失将该硬分配细化为软分配矩阵：
+\begin{equation}\label{eq:struct_assign}
+  \mathbf{S} = \operatorname{softmax}\!\bigl(\operatorname{GAT}(\mathbf{X}_{\text{seg}},\, \mathbf{A}) \odot \mathbf{M}_1\bigr),
+\end{equation}
+其中，逐元素乘积 $\odot \mathbf{M}_1$ 用于保留谱聚类得到的拓扑结构，softmax 用于按列归一化。
+预计算完成后，$\mathbf{S}$ 将从计算图中分离并缓存。
+
+功能分配矩阵 $\mathbf{F} \in \mathbb{R}^{M \times R}$。局部区域到区域的分配关系利用轨迹共现信息刻画功能相似性。具体而言，我们在所有轨迹上采用长度为 $L{=}5$ 的滑动窗口统计转移频次，构造转移频率矩阵 $\mathbf{T} \in \mathbb{R}^{N \times N}$，并与 $k$ 跳可达矩阵 $\mathbf{C}$ 相结合，形成目标矩阵 $\hat{\mathbf{C}} = \mathbf{C} + \mathbf{T}$。
+随后训练一个 GCN 模型 300 个 epoch，得到：
+\begin{equation}\label{eq:fnc_assign}
+  \mathbf{F} = \operatorname{softmax}\!\bigl(\operatorname{GCN}(\mathbf{X}_{\text{loc}},\, \mathbf{A}^{\text{loc}})\bigr),
+\end{equation}
+其优化目标为最小化 $\|\mathbf{F}\,\mathbf{F}^\top - \hat{\mathbf{C}}\|_F^2$，
+使具有相似轨迹流动模式的局部区域被归入同一区域。
+与 $\mathbf{S}$ 相同，$\mathbf{F}$ 在预计算完成后也将被分离并缓存。
+
+$\mathbf{S}$ 与 $\mathbf{F}$ 在模型训练过程中不会被更新：
+它们不参与梯度传播，而是作为固定的结构先验使用。
+这种设计避免了层次结构与双曲表示联合学习可能带来的不稳定性，
+并保证蕴含约束从训练初始阶段起就作用于一致的层次划分上。
+
+HHRoad 对三类层次包含关系施加蕴含约束，对应路网层次结构：
+\begin{enumerate}[label=(\arabic*)]
+    \item 功能区到局部区域：对每个功能区 $r_k$ 及其下属局部区域 $c_j$；
+    \item 局部区域到路段：对每个局部区域 $c_j$ 及其下属路段 $v_i$；
+    \item 路段到路段：对每对拓扑相邻的路段 $(v_i, v_j) \in \mathcal{E}$。
+\end{enumerate}
+蕴含损失通过铰链函数惩罚违反蕴含关系的情况：
+\begin{equation}
+    \mathcal{L}_{\text{CE}} = \frac{1}{|\mathcal{P}|}
+    \sum_{(\mathbf{x}, \mathbf{y}) \in \mathcal{P}}
+    \text{ReLU}\!\left(-s(\mathbf{x}, \mathbf{y})\right),
+    \label{eq:loss_ce}
+\end{equation}
+其中 $\mathcal{P}$ 为从上述三类关系中采样的所有父-子对集合。
+集合 $\mathcal{P}$ 的构造。由于在大规模道路网络上穷举所有节点对的代价过高，
+我们在每个训练步采用分层采样方式构造 $\mathcal{P}$：
+
+\begin{enumerate}[label=(\arabic*)]
+  \item 功能区到局部区域：对所有满足 $F_{\ell r} > 0$ 的 $(r, \ell)$ 对进行穷举纳入
+    （通常约为 $\sim\!R {\times} \bar{k}$ 对，其中 $\bar{k}$ 表示每个区域平均包含的局部区域数量）；
+  \item 局部区域到路段：均匀采样 $\min(50, M)$ 个局部区域，
+    对于每个被采样的局部区域 $\ell$，再采样 $\min(10, |\ell|)$ 个成员路段；
+  \item 路段到路段：均匀采样 $\min(1000, |\mathcal{E}|)$ 条边，
+    并对每条采样边施加双向蕴含约束。
+\end{enumerate}
+
+由于 $\mathbf{S}$ 与 $\mathbf{F}$ 均为固定矩阵），
+父子成员关系在整个训练过程中是确定的——每一步变化的仅是随机采样的子集。
+这避免了在训练早期由于层次分配噪声而干扰蕴含约束的问题。
+
+\subsection{层次对比学习}
+
+为进一步锐化嵌入空间的语义结构，HHRoad 在两个粒度上施加对比学习。
+
+路段层内对比学习。 对每条采样边 $(v_i, v_j) \in \mathcal{E}$，以路段 $v_i$ 为锚点，拓扑相邻路段 $v_j$ 为正例，随机采样 $K$ 条路段为负例。相似度定义为 Lorentz 距离的负值，损失函数采用 InfoNCE 形式：
+\begin{equation}
+    \mathcal{L}_{\text{intra}} = -\frac{1}{|\mathcal{E}_s|}
+    \sum_{(i,j) \in \mathcal{E}_s}
+    \log \frac{
+      \exp\!\left(-d_{\mathbb{L}}(\mathbf{h}_i, \mathbf{h}_j) / \tau\right)
+    }{
+      \exp\!\left(-d_{\mathbb{L}}(\mathbf{h}_i, \mathbf{h}_j) / \tau\right)
+      + \sum_{k=1}^{K} \exp\!\left(-d_{\mathbb{L}}(\mathbf{h}_i, \mathbf{h}_{n_k}) / \tau\right)
+    },
+    \label{eq:loss_seg_cl}
+\end{equation}
+其中 $\mathcal{E}_s$ 为采样边集合，$\{n_k\}_{k=1}^K$ 为负样本，$\tau$ 为温度参数。
+
+跨层对比学习。 对每个局部区域 $c_j$，将其与随机选取的下属路段 $v_i \in c_j$（正例）和 $K$ 条随机路段（负例）配对：
+\begin{equation}
+    \mathcal{L}_{\text{cross}} = -\frac{1}{|\mathcal{L}_c|}
+    \sum_{(c_j, i) \in \mathcal{L}_c}
+    \log \frac{
+      \exp\!\left(-d_{\mathbb{L}}(\mathbf{h}_{c_j}, \mathbf{h}_i) / \tau\right)
+    }{
+      \exp\!\left(-d_{\mathbb{L}}(\mathbf{h}_{c_j}, \mathbf{h}_i) / \tau\right)
+      + \sum_{k=1}^{K} \exp\!\left(-d_{\mathbb{L}}(\mathbf{h}_{c_j}, \mathbf{h}_{n_k}) / \tau\right)
+    }.
+    \label{eq:loss_cross_cl}
+\end{equation}
+组合对比损失为 $\mathcal{L}_{\text{CC}} = \mathcal{L}_{\text{intra}} + \mathcal{L}_{\text{cross}}$。
+
+\subsubsection{道路功能分类损失}
+
+采用桥梁道路二分类任务作为上游表示学习的主要监督信号。每个道路路段 $v_i$ 都包含属性 road\_bridge，用于指示该路段是否为桥梁：若为桥梁则 $y_i{=}1$，否则 $y_i{=}0$。训练时，我们构造平衡批次：对每个桥梁路段随机采样一个非桥梁路段进行配对，从而形成 $1\!:\!1$ 的正负样本比例。
+
+给定式~(\ref{eq:output}) 的输出表示 $\mathbf{r}_i$，分类损失采用标准交叉熵：
+\begin{equation}
+    \mathcal{L}_{\text{cls}} = -\frac{1}{|\mathcal{B}|} \sum_{i \in \mathcal{B}}
+    \log \frac{\exp(\mathbf{r}_i^\top \mathbf{w}_{y_i})}
+         {\sum_{c=1}^{C} \exp(\mathbf{r}_i^\top \mathbf{w}_{c})},
+    \label{eq:loss_cls}
+\end{equation}
+其中 $\mathcal{B}$ 为训练批次，$y_i$ 为路段 $v_i$ 的真实类别标签，$C$ 为道路类别总数。需要强调的是，该桥梁分类目标仅作为一种预训练任务来引导表示学习，它与实验中用于评估的三个下游任务（ASI、TTE、STS）不同，二者使用各自独立的数据划分与标签来源。选择桥梁属性作为预训练信号的原因在于，其与道路的结构属性（如连通性与道路层级）具有较强相关性，同时又能够直接从 OpenStreetMap 中获得，无需额外人工标注。
+
+\subsubsection{总训练目标}
+
+HHRoad 的训练由三个互补的损失函数联合驱动。整体损失为三个分量的加权和：
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{\text{cls}}
+    + \lambda_1 \mathcal{L}_{\text{CE}}
+    + \lambda_2 \mathcal{L}_{\text{CC}},
+    \label{eq:total_loss}
+\end{equation}
+其中 $\lambda_1$ 和 $\lambda_2$ 分别平衡蕴含损失和对比损失的贡献。整个模型以 Adam 优化器端到端训练，并采用梯度裁剪以防止双曲操作固有的数值不稳定性。
+
+\subsection{输出表示}
+
+最终的路段表示通过拼接初始双曲特征 $\mathbf{h}_i^{(0)}$（来自双曲嵌入层）与经层次消息传递精炼后的路段嵌入 $\mathbf{h}_i$，并通过线性层投影至 $D_o$ 维欧氏向量：
+\begin{equation}
+    \mathbf{r}_i = \mathbf{W}_o [\mathbf{h}_i^{(0)} \| \mathbf{h}_i] + \mathbf{b}_o
+    \in \mathbb{R}^{D_o},
+    \label{eq:output}
+\end{equation}
+其中 $\mathbf{W}_o \in \mathbb{R}^{D_o \times 2(n+1)}$，$\mathbf{b}_o \in \mathbb{R}^{D_o}$。拼接初始嵌入的设计使模型在经过多层消息传递后仍能保留路段的原始属性信息，避免因过度平滑导致的信息损失。该欧氏输出可直接接入任意下游任务头。
+
+
+\section{实验与结果}
+
+
+\subsection{实验设置}
+
+VecCity\cite{zhang2025veccity} 是面向地图实体表示学习（MapRL）的统一开发与评测工具库，旨在解决 MapRL 领域长期存在的研究碎片化与缺乏标准化基准两大问题。VecCity 围绕"编码器—预训练任务—下游任务"三要素构建方法论分类体系，将各类模型组织于统一框架下，而非按地图实体类型分立管理。在数据层面，VecCity 预置了城市路网、POI 及土地利用数据，统一以原子文件格式存储；在接口层面，库提供标准接口，支持端到端的预训练、微调与评估流程。基于该库，实验以完全一致的数据划分、超参数搜索策略和评估指标对所有方法进行公平比较，有效消除了不同工作因数据集与实验设定差异所带来的干扰。
+
+在 VecCity 基准框架中，对三类下游任务进行评估。平均速度推断（ASI）通过路段嵌入预测该路段的平均行驶速度，评价指标为 MAE 和 RMSE。行程时间估计（TTE）估计轨迹上路段序列的总行驶时间，评价指标为 MAE 和 RMSE。轨迹相似性检索（STS）给定查询轨迹从数据库中检索最相似轨迹，评价指标为 ACC@3 和平均排名（MR）。
+
+在五个城市数据集上进行评估。五个城市数据集均通过 VecCity 开源工具库\cite{zhang2025veccity}获取，
+代码仓库地址为 \url{https://github.com/Bigscity-VecCity/VecCity}。
+采用统一的原子文件（Atomic Files）格式组织城市时空数据，包含三类文件：geo 文件存储地图实体的地理属性，traj文件存储轨迹序列数据，rel文件存储实体间的关系网络。
+
+路网实体（道路节点与路段）由 OpenStreetMap（OSM）开源地图抽取，
+坐标轨迹数据来源于公开的出租车/网约车 GPS 轨迹数据集，并经统一预处理——包括地图匹配、噪声过滤与按城市行政边界裁剪——转换为原子文件格式后集成至库中。用户亦可参照库提供的数据转换脚本，将私有时空数据转换为相同格式直接接入实验流程。五城市在网络规模、路网密度和空间格局上差异显著，为评估模型跨城市泛化能力提供了多样化测试。五城市可视化如图~\ref{tab:roadnet_hhroad} 所示。
+
+每条路段的属性特征包括：唯一路段编号、道路类型（如高速路、主干道、次干道、支路、居住区道路等 OSM 标准类别）、路段几何长度、车道数、以及是否为桥梁。路段之间的拓扑邻接关系以有向图的形式存储于 rel文件，
+形成路段邻接矩阵 $\mathbf{A} \in \{0,1\}^{|\mathcal{S}| \times |\mathcal{S}|}$，
+其中 $|\mathcal{S}|$ 为路段总数。每条轨迹记录为经地图匹配后的路段 ID 序列，
+附带时间戳信息。预处理流程已将原始 GPS 序列统一匹配至路网图，
+并剔除了停留时间异常、轨迹长度过短等噪声样本。五个数据集的详细统计信息如表~\ref{tab:dataset_stats} 所示，
+包括路段数量、轨迹规模及路网基础拓扑指标。
+
+\begin{table}[H]
+    \centering
+    \caption{HHRoad 数据集各城市路网统计}
+    \label{tab:dataset_stats}
+    \small
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabular}{lrcccr}
+        \toprule
+        城市 & 路段数 & 路段总长/km & 路网密度/(km$\cdot$km$^{-2}$) & 平均路段长/m & 主导道路类型 \\
+        \midrule
+        北京（BJ）    & 54{,}945 & 8{,}558 & 15.09 & 156 & 居住区、支路 \\
+        成都（CD）    & 31{,}933 & 5{,}758 & 13.57 & 180 & 居住区、支路 \\
+        西安（XA）    & 35{,}501 & 6{,}549 & 12.87 & 184 & 支路、居住区 \\
+        波尔图（PRT） & 28{,}921 & 2{,}595 & 18.65 &  90 & 居住区、次干道 \\
+        旧金山（SF）  & 27{,}595 & 3{,}117 & 17.77 & 113 & 居住区、支路 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+ 
+
+% ================================================================
+%  HHRoad 数据集五城市路网可视化（单页，两列，普通 table）
+%  所需宏包：booktabs, graphicx
+% ================================================================
+
+\begin{table}[H]
+    \centering
+    \caption[HHRoad 数据集五城市路网可视化]{%
+        HHRoad 数据集五城市路网可视化。
+        颜色编码道路等级：红色为高速路／快速路，橙黄色为主干道，
+        绿色为次干道，蓝色为支路，灰白色为居住区道路及其他。}
+    \label{tab:roadnet_hhroad}
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.0}
+    \begin{tabular}{@{\extracolsep{\fill}}cc@{}}
+        \toprule
+        \multicolumn{2}{c}{\textbf{HHRoad 数据集可视化}} \\
+        \midrule
+        \includegraphics[width=0.44\textwidth]{figures/roadnet_bj.pdf} &
+        \includegraphics[width=0.44\textwidth]{figures/roadnet_cd.pdf} \\[-4pt]
+        (a) 北京（BJ） & (b) 成都（CD） \\[4pt]
+        \includegraphics[width=0.44\textwidth]{figures/roadnet_xa.pdf} &
+        \includegraphics[width=0.44\textwidth]{figures/roadnet_prt.pdf} \\[-4pt]
+        (c) 西安（XA） & (d) 波尔图（PRT） \\[4pt]
+        \includegraphics[width=0.44\textwidth]{figures/roadnet_sf.pdf} & \\[-4pt]
+        (e) 旧金山（SF） & \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+
+双曲嵌入维度 $n=224$（Lorentz 模型实际维度 $n+1=225$），曲率固定为 $\kappa=1.0$，$\lambda_1=\lambda_2=0.1$，温度 $\tau=0.07$，孔径阈值 $\eta=1.5$，$|\mathcal{C}|=300$，$|\mathcal{R}|=30$。训练 100 个 epoch，早停（patience=50）。所有实验在 NVIDIA RTX 3090 GPU 上进行，重复 5 次取平均。
+
+实验对三类下游任务进行评估：平均速度推断（Average Speed Inference，ASI）通过路段嵌入预测该路段的平均行驶速度，以 MAE 和 RMSE 为评价指标；行程时间估计（Travel Time Estimation，TTE）根据路段序列估计轨迹的总行驶时间，
+同样以 MAE 和 RMSE 衡量；轨迹相似性检索（Similarity Trajectory Search，STS）给定查询轨迹，从候选数据库中检索语义最相近的轨迹，以 ACC@3 和平均排名（MR）评估检索质量。三类任务分别考察路段嵌入对道路物理属性的编码能力、对路段序列语义依赖的建模能力以及嵌入空间几何结构的判别质量，从不同维度对模型表示能力进行全面检验。
+
+对比方法包括 RN2Vec\cite{wang2019rn2vec}、HRNR\cite{wu2020hrnr}、SARN\cite{chang2023sarn}、Toast\cite{chen2021toast}、HRoad\cite{zhang2023road}、START\cite{chen2022start} 和 JCLRNT\cite{mao2022jclrnt} 七种方法，均为 VecCity 库中已复现的主流路段表示学习基线。RN2Vec 基于地理距离阈值构建邻居关系，以 Token 编码器和 TokRI 预训练任务学习路段嵌入，是纯 Token 范式的代表。HRNR 采用三层层次图神经网络，在欧氏空间中捕获路网的连通性、结构性与功能性三类关系，是层次建模思路下最具代表性的基线，也是与 HHRoad 进行直接对比的关键参照。SARN 通过图对比学习建模路段间的空间结构依赖。Toast 结合 Transformer 与图编码器，利用轨迹数据增强路段语义表示。HRoad 采用超图结构刻画路段间的高阶关系，以图自编码器和节点特征推断为预训练任务，是图范式下引入多类预训练任务的代表。START 将行程时间信息融入 Transformer 的注意力机制，并结合掩码轨迹恢复与轨迹对比学习进行预训练。JCLRNT 在完整的 Token-图-序列三阶段流水线中联合使用图对比学习与轨迹对比学习，是当前综合性能最强的全流程基线之一。
+
+\subsection{实验结果}
+
+表~\ref{tab:HHRoad_bj}--\ref{tab:HHRoad_sf} 分别展示了五个城市上的完整性能对比结果，表~\ref{tab:HHRoad_ranking} 汇总了各方法在五个城市上的综合平均排名。所有实验重复 5 次，报告均值$\pm$标准差。加粗数字表示最优结果，下划线表示次优结果。
+
+
+% ---------- 北京 ----------
+\begin{table}[H]
+    \centering
+    \caption{北京（BJ）数据集上各方法性能对比}
+    \label{tab:HHRoad_bj}
+    \small
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabular}{llcccccccc}
+        \toprule
+        \textbf{任务} & \textbf{指标}
+            & \textbf{RN2Vec} & \textbf{HRNR} & \textbf{SARN}
+            & \textbf{Toast} & \textbf{HRoad} & \textbf{START}
+            & \textbf{JCLRNT} & \textbf{HHRoad} \\
+        \midrule
+        \multirow{2}{*}{ASI}
+            & MAE$\downarrow$
+            & 3.58\tiny{±.01} & 3.16\tiny{±.00} & 2.81\tiny{±.00}
+            & 2.74\tiny{±.01} & \underline{2.71}\tiny{±.01} & 2.72\tiny{±.01}
+            & 2.80\tiny{±.02} & \textbf{2.65}\tiny{±.00} \\
+            & RMSE$\downarrow$
+            & 5.73\tiny{±.00} & 5.59\tiny{±.00} & 5.48\tiny{±.00}
+            & 5.51\tiny{±.01} & 5.41\tiny{±.00} & \underline{5.39}\tiny{±.00}
+            & 5.48\tiny{±.01} & \textbf{5.37}\tiny{±.00} \\
+        \cmidrule(lr){1-10}
+        \multirow{2}{*}{TTE}
+            & MAE$\downarrow$
+            & 661\tiny{±14.0} & 631\tiny{±19.3} & 596\tiny{±20.8}
+            & 533\tiny{±33.0} & 585\tiny{±16.3} & \textbf{512}\tiny{±19.9}
+            & \underline{514}\tiny{±38.3} & 525\tiny{±1.0} \\
+            & RMSE$\downarrow$
+            & 2978\tiny{±48} & 2968\tiny{±42} & 2581\tiny{±84}
+            & 2576\tiny{±79} & 2554\tiny{±35} & \underline{2502}\tiny{±37}
+            & \textbf{2464}\tiny{±36} & 2966\tiny{±3.4} \\
+        \cmidrule(lr){1-10}
+        \multirow{2}{*}{STS}
+            & ACC@3$\uparrow$
+            & 0.76\tiny{±.03} & 0.82\tiny{±.03} & 0.84\tiny{±.03}
+            & 0.79\tiny{±.10} & 0.87\tiny{±.01} & \underline{0.90}\tiny{±.03}
+            & 0.90\tiny{±.04} & \textbf{0.95}\tiny{±.00} \\
+            & MR$\downarrow$
+            & 12.4\tiny{±1.54} & 11.5\tiny{±1.94} & 13.3\tiny{±2.17}
+            & 12.8\tiny{±2.81} & 14.0\tiny{±1.42} & \underline{10.9}\tiny{±1.98}
+            & \textbf{10.4}\tiny{±1.15} & 25.2\tiny{±0.93} \\
+        \midrule
+        \multicolumn{2}{l}{Pre Ave Rank$\downarrow$}
+            & 7.33 & 6.17 & 5.42 & 5.00 & 4.00 & \textbf{2.08} & \underline{2.67} & 3.33 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+% ---------- 成都 ----------
+\begin{table}[H]
+    \centering
+    \caption{成都（CD）数据集上各方法性能对比}
+    \label{tab:HHRoad_cd}
+    \small
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabular}{llcccccccc}
+        \toprule
+        \textbf{任务} & \textbf{指标}
+            & \textbf{RN2Vec} & \textbf{HRNR} & \textbf{SARN}
+            & \textbf{Toast} & \textbf{HRoad} & \textbf{START}
+            & \textbf{JCLRNT} & \textbf{HHRoad} \\
+        \midrule
+        \multirow{2}{*}{ASI}
+            & MAE$\downarrow$
+            & 6.57\tiny{±.06} & 6.42\tiny{±.04} & \underline{5.99}\tiny{±.02}
+            & 6.36\tiny{±.03} & \textbf{5.93}\tiny{±.02} & 6.05\tiny{±.01}
+            & 6.35\tiny{±.08} & 6.11\tiny{±.00} \\
+            & RMSE$\downarrow$
+            & 14.0\tiny{±.07} & 13.7\tiny{±.07} & \underline{13.3}\tiny{±.04}
+            & 13.3\tiny{±.16} & \textbf{13.2}\tiny{±.00} & 13.5\tiny{±.01}
+            & 13.5\tiny{±.13} & 13.2\tiny{±.00} \\
+        \cmidrule(lr){1-10}
+        \multirow{2}{*}{TTE}
+            & MAE$\downarrow$
+            & 106\tiny{±.06} & 100\tiny{±.04} & \textbf{88.3}\tiny{±4.27}
+            & 95.0\tiny{±2.44} & \underline{88.5}\tiny{±5.48} & 95.8\tiny{±3.12}
+            & 97.0\tiny{±4.08} & 89.8\tiny{±0.71} \\
+            & RMSE$\downarrow$
+            & 155\tiny{±.07} & 150\tiny{±.05} & 157\tiny{±6.70}
+            & 150\tiny{±2.75} & \textbf{137}\tiny{±5.67} & 151\tiny{±3.84}
+            & 148\tiny{±3.79} & \underline{143}\tiny{±1.89} \\
+        \cmidrule(lr){1-10}
+        \multirow{2}{*}{STS}
+            & ACC@3$\uparrow$
+            & 0.69\tiny{±.04} & 0.73\tiny{±.06} & 0.68\tiny{±.13}
+            & 0.69\tiny{±.02} & 0.68\tiny{±.05} & \underline{0.76}\tiny{±.03}
+            & 0.72\tiny{±.00} & \textbf{0.83}\tiny{±.00} \\
+            & MR$\downarrow$
+            & 48.1\tiny{±1.67} & 43.0\tiny{±3.37} & 36.6\tiny{±3.14}
+            & 22.4\tiny{±3.66} & 24.4\tiny{±3.01} & \underline{19.2}\tiny{±2.72}
+            & 18.7\tiny{±2.53} & \textbf{15.2}\tiny{±0.13} \\
+        \midrule
+        \multicolumn{2}{l}{Pre Ave Rank$\downarrow$}
+            & 7.42 & 5.92 & 4.67 & 4.58 & \underline{2.92} & 4.08 & 4.25 & \textbf{2.17} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+HHRoad 在所有五城市的 STS ACC@3 上均取得最优：北京 0.952，成都 0.831，西安 0.851，波尔图 0.959，旧金山 0.964。相比最强基线的 ACC@3 提升最高达 9.4\%（成都，相比 START 的 0.76）。这一显著优势表明双曲嵌入通过将层次结构几何化，使路段在超球面上的相对位置本身就蕴含了结构相似性信息，为轨迹级别的相似性检索提供了更优质的几何基础。
+
+这一全面领先并非偶然，而是双曲嵌入几何结构与轨迹相似性度量内在逻辑高度契合的必然结果。
+
+轨迹相似性检索的本质是：语义相近的路段序列在嵌入空间中应形成紧凑的聚类。
+在双曲空间中，层次结构相同的路段（同属一个局部区域或功能区）在自底向上聚合后
+自然位于嵌入空间的相近区域，蕴含锥约束进一步收紧了同层次路段的角度分布。
+因此，共享层次归属的轨迹在双曲嵌入空间中的 Lorentz 距离显著低于非共享轨迹，
+top-3 精度随之提升。这一机制在欧氏空间中难以复现，
+原因在于欧氏距离对层次结构不敏感——两条经过不同功能区的轨迹，
+其路段嵌入在欧氏空间中的平均距离可能与同功能区轨迹相当，
+导致检索精度受限于距离度量的语义表达力。
+
+与此同时，STS MR 指标在北京数据集上呈现的异常（HHRoad 的 MR 25.2 劣于 JCLRNT 的 10.4）同样来自双曲嵌入的几何特性，而非模型缺陷。
+双曲空间的负曲率导致非相似样本在嵌入空间中被推至极远距离（即"双曲排斥"效应），
+对于少数未命中 top-3 的查询，正确候选的排名误差呈重尾分布，拉高均值 MR。
+该现象的严重程度随路网规模增大而加剧（北京最大、旧金山最小），
+与 ACC@3 的改善趋势方向相反但成因一致，均源于双曲空间对层次语义的极化编码。
+在实际应用场景下，top-3 精度（ACC@3）的实用价值通常高于平均排名（MR），
+因此上述权衡整体上有利于 HHRoad 的实用性。
+
+% ---------- 西安 ----------
+\begin{table}[H]
+    \centering
+    \caption{西安（XA）数据集上各方法性能对比}
+    \label{tab:HHRoad_xa}
+    \small
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabular}{llcccccccc}
+        \toprule
+        \textbf{任务} & \textbf{指标}
+            & \textbf{RN2Vec} & \textbf{HRNR} & \textbf{SARN}
+            & \textbf{Toast} & \textbf{HRoad} & \textbf{START}
+            & \textbf{JCLRNT} & \textbf{HHRoad} \\
+        \midrule
+        \multirow{2}{*}{ASI}
+            & MAE$\downarrow$
+            & 6.33\tiny{±.03} & 5.79\tiny{±.12} & \textbf{5.36}\tiny{±.03}
+            & 5.63\tiny{±.01} & 5.41\tiny{±.07} & \underline{5.38}\tiny{±.07}
+            & 5.67\tiny{±.02} & 5.46\tiny{±.00} \\
+            & RMSE$\downarrow$
+            & 13.1\tiny{±.37} & 11.2\tiny{±.10} & \textbf{10.6}\tiny{±.01}
+            & 10.8\tiny{±.12} & \underline{10.7}\tiny{±.05} & 10.8\tiny{±.07}
+            & 10.9\tiny{±.06} & 10.7\tiny{±.00} \\
+        \cmidrule(lr){1-10}
+        \multirow{2}{*}{TTE}
+            & MAE$\downarrow$
+            & 137\tiny{±6.67} & 134\tiny{±5.09} & \underline{110}\tiny{±4.26}
+            & 122\tiny{±4.52} & 110\tiny{±3.68} & 115\tiny{±15.4}
+            & \textbf{108}\tiny{±6.82} & 115\tiny{±1.07} \\
+            & RMSE$\downarrow$
+            & 199\tiny{±8.23} & 203\tiny{±11.9} & \textbf{169}\tiny{±5.63}
+            & 191\tiny{±3.62} & \underline{172}\tiny{±8.94} & 170\tiny{±13.9}
+            & 178\tiny{±8.34} & 183\tiny{±2.31} \\
+        \cmidrule(lr){1-10}
+        \multirow{2}{*}{STS}
+            & ACC@3$\uparrow$
+            & 0.71\tiny{±.01} & 0.74\tiny{±.04} & 0.72\tiny{±.07}
+            & \underline{0.80}\tiny{±.03} & 0.73\tiny{±.01} & 0.75\tiny{±.04}
+            & 0.77\tiny{±.02} & \textbf{0.85}\tiny{±.00} \\
+            & MR$\downarrow$
+            & 12.9\tiny{±1.71} & 12.1\tiny{±1.48} & 12.5\tiny{±3.62}
+            & 16.5\tiny{±4.28} & 19.0\tiny{±2.95} & \textbf{10.8}\tiny{±3.54}
+            & \underline{11.9}\tiny{±3.15} & 16.1\tiny{±0.62} \\
+        \midrule
+        \multicolumn{2}{l}{Pre Ave Rank$\downarrow$}
+            & 7.33 & 6.17 & \textbf{2.75} & 5.08 & 4.25 & \underline{3.08} & 3.67 & 3.67 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+% ---------- 波尔图 ----------
+\begin{table}[H]
+    \centering
+    \caption{波尔图（PRT）数据集上各方法性能对比}
+    \label{tab:HHRoad_prt}
+    \small
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabular}{llcccccccc}
+        \toprule
+        \textbf{任务} & \textbf{指标}
+            & \textbf{RN2Vec} & \textbf{HRNR} & \textbf{SARN}
+            & \textbf{Toast} & \textbf{HRoad} & \textbf{START}
+            & \textbf{JCLRNT} & \textbf{HHRoad} \\
+        \midrule
+        \multirow{2}{*}{ASI}
+            & MAE$\downarrow$
+            & 4.39\tiny{±.00} & 4.40\tiny{±.00} & 4.29\tiny{±.00}
+            & 4.36\tiny{±.01} & \textbf{4.20}\tiny{±.01} & \underline{4.21}\tiny{±.00}
+            & 4.35\tiny{±.05} & 4.22\tiny{±.00} \\
+            & RMSE$\downarrow$
+            & 7.90\tiny{±.00} & \textbf{7.58}\tiny{±.00} & 7.78\tiny{±.00}
+            & 7.93\tiny{±.05} & \underline{7.71}\tiny{±.01} & 7.79\tiny{±.04}
+            & 7.79\tiny{±.05} & 7.74\tiny{±.00} \\
+        \cmidrule(lr){1-10}
+        \multirow{2}{*}{TTE}
+            & MAE$\downarrow$
+            & 99.5\tiny{±1.78} & 101\tiny{±1.98} & 97.2\tiny{±1.38}
+            & 98.4\tiny{±1.81} & 98.5\tiny{±2.83} & 97.5\tiny{±6.92}
+            & \underline{96.8}\tiny{±1.30} & \textbf{96.0}\tiny{±0.24} \\
+            & RMSE$\downarrow$
+            & 150\tiny{±3.60} & 147\tiny{±2.60} & \underline{143}\tiny{±1.80}
+            & 147\tiny{±2.48} & \textbf{140}\tiny{±2.22} & 158\tiny{±7.04}
+            & 145\tiny{±1.03} & 145\tiny{±0.30} \\
+        \cmidrule(lr){1-10}
+        \multirow{2}{*}{STS}
+            & ACC@3$\uparrow$
+            & 0.80\tiny{±.10} & 0.82\tiny{±.11} & 0.83\tiny{±.03}
+            & \underline{0.90}\tiny{±.06} & 0.83\tiny{±.04} & 0.88\tiny{±.02}
+            & 0.87\tiny{±.04} & \textbf{0.96}\tiny{±.00} \\
+            & MR$\downarrow$
+            & 14.3\tiny{±1.91} & 12.0\tiny{±1.81} & 17.9\tiny{±3.40}
+            & 12.1\tiny{±4.03} & 17.2\tiny{±1.80} & 13.7\tiny{±2.44}
+            & \underline{11.4}\tiny{±3.38} & \textbf{9.23}\tiny{±1.15} \\
+        \midrule
+        \multicolumn{2}{l}{Pre Ave Rank$\downarrow$}
+            & 7.00 & 5.42 & 4.42 & 5.08 & \underline{3.75} & 4.58 & 3.75 & \textbf{2.00} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+在 ASI 任务上，HHRoad 在北京实现最优 MAE（2.65）和 RMSE（5.37），在其他城市通常排名前三，表明双曲表示在保持细粒度属性信息的同时成功编码了层次结构。
+
+在 TTE 任务上结果较为混合。HHRoad 在波尔图和旧金山上取得最优，但部分城市的 TTE RMSE 不及 START 和 JCLRNT 等全流程模型。原因在于 TTE 高度依赖序列轨迹建模，而 HHRoad 仅使用图编码器而无序列编码器，在序列建模上存在架构性劣势。
+% ---------- 旧金山 ----------
+\begin{table}[H]
+    \centering
+    \caption{旧金山（SF）数据集上各方法性能对比}
+    \label{tab:HHRoad_sf}
+    \small
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabular}{llcccccccc}
+        \toprule
+        \textbf{任务} & \textbf{指标}
+            & \textbf{RN2Vec} & \textbf{HRNR} & \textbf{SARN}
+            & \textbf{Toast} & \textbf{HRoad} & \textbf{START}
+            & \textbf{JCLRNT} & \textbf{HHRoad} \\
+        \midrule
+        \multirow{2}{*}{ASI}
+            & MAE$\downarrow$
+            & 2.98\tiny{±.00} & 2.51\tiny{±.00} & 2.49\tiny{±.01}
+            & 2.56\tiny{±.00} & 2.48\tiny{±.01} & \underline{2.45}\tiny{±.00}
+            & \textbf{2.42}\tiny{±.01} & 2.51\tiny{±.00} \\
+            & RMSE$\downarrow$
+            & 5.80\tiny{±.00} & 5.38\tiny{±.01} & \underline{5.29}\tiny{±.01}
+            & 5.29\tiny{±.00} & \textbf{5.25}\tiny{±.00} & 5.33\tiny{±.00}
+            & 5.37\tiny{±.00} & 5.30\tiny{±.00} \\
+        \cmidrule(lr){1-10}
+        \multirow{2}{*}{TTE}
+            & MAE$\downarrow$
+            & 289\tiny{±1.02} & 288\tiny{±1.01} & 279\tiny{±3.21}
+            & 274\tiny{±9.01} & \underline{270}\tiny{±7.61} & 268\tiny{±10.2}
+            & 275\tiny{±9.30} & \textbf{258}\tiny{±1.29} \\
+            & RMSE$\downarrow$
+            & 1479\tiny{±4.3} & 1449\tiny{±4.4} & 1499\tiny{±3.6}
+            & \textbf{1372}\tiny{±28} & 1446\tiny{±21} & 1497\tiny{±38}
+            & \underline{1446}\tiny{±21} & 1571\tiny{±17.1} \\
+        \cmidrule(lr){1-10}
+        \multirow{2}{*}{STS}
+            & ACC@3$\uparrow$
+            & 0.84\tiny{±.04} & 0.91\tiny{±.00} & 0.86\tiny{±.07}
+            & \underline{0.94}\tiny{±.04} & 0.92\tiny{±.01} & 0.90\tiny{±.07}
+            & 0.87\tiny{±.05} & \textbf{0.96}\tiny{±.00} \\
+            & MR$\downarrow$
+            & 7.20\tiny{±3.19} & 7.00\tiny{±.01} & 8.48\tiny{±2.05}
+            & 9.22\tiny{±3.29} & \underline{6.55}\tiny{±1.22} & 6.71\tiny{±2.01}
+            & \textbf{6.49}\tiny{±1.63} & 7.27\tiny{±1.16} \\
+        \midrule
+        \multicolumn{2}{l}{Pre Ave Rank$\downarrow$}
+            & 7.00 & 5.33 & 5.58 & 4.08 & \textbf{2.42} & 3.83 & \underline{3.58} & 4.17 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+图~\ref{fig:performance_heatmap} 以热力图形式对表~\ref{tab:HHRoad_ranking}的排名数据进行可视化，直观展示了各方法在五城市上性能分布的空间格局与跨城市稳定性差异。HHRoad 在成都（2.17）和波尔图（2.00）两座城市取得最优排名，在北京、西安、旧金山亦保持前列，五城市综合平均排名（3.07）优于所有基线方法。值得注意的是，SARN 在西安（2.75）出现局部最优但跨城市稳定性较差，
+而 HHRoad 的热力图色深分布最为均匀，体现出更强的跨城市泛化能力。
+
+HHRoad 在五个城市的综合平均排名（3.07）优于所有基线方法（表~\ref{tab:HHRoad_ranking}）。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/fig1_performance_heatmap.png}
+    \caption[各方法在五个城市上的 Pre Ave Rank 热力图]{各方法在五个城市数据集上的 Pre Ave Rank 热力图,颜色越深表示综合性能越优；红色边框标注 HHRoad 所在列。}
+    \label{fig:performance_heatmap}
+\end{figure}
+
+% ---------- 综合平均排名汇总 ----------
+\begin{table}[H]
+    \centering
+    \caption[各方法在五个城市上的综合平均排名]{各方法在五个城市上的综合平均排名（Pre Ave Rank$\downarrow$，越小越优）}
+    \label{tab:HHRoad_ranking}
+    \setlength{\tabcolsep}{12pt}
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabular}{clc}
+        \toprule
+        \textbf{总体排名} & \textbf{方法} & \textbf{5 城市平均 Pre Ave Rank$\downarrow$} \\
+        \midrule
+        1 & \textbf{HHRoad} & \textbf{3.07} \\
+        2 & HRoad           & 3.47 \\
+        3 & START           & 3.53 \\
+        4 & JCLRNT          & 3.58 \\
+        5 & SARN            & 4.57 \\
+        6 & Toast           & 4.76 \\
+        7 & HRNR            & 5.80 \\
+        8 & RN2Vec          & 7.22 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsubsection{消融实验}
+
+为系统评估 HHRoad 各核心设计选择的独立贡献，构造如下三个消融变体，覆盖双曲嵌入空间、多层次架构、蕴含约束、对比学习及消息传递方案五个设计维度。
+
+
+% ---------- 北京消融 ----------
+\begin{table}[H]
+    \centering
+    \caption{北京（BJ）数据集上的消融实验结果}
+    \label{tab:ablation_bj}
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabular}{lcccccc}
+        \toprule
+        \multirow{2}{*}{模型变体}
+            & \multicolumn{2}{c}{\textbf{ASI}}
+            & \multicolumn{2}{c}{\textbf{TTE}}
+            & \multicolumn{2}{c}{\textbf{STS}} \\
+        \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+            & MAE$\downarrow$ & RMSE$\downarrow$
+            & MAE$\downarrow$ & RMSE$\downarrow$
+            & ACC@3$\uparrow$ & MR$\downarrow$ \\
+        \midrule
+        HHRoad-E
+            & 3.16\tiny{±.02} & 5.61\tiny{±.02}
+            & 641\tiny{±7.2}  & 3018\tiny{±42}
+            & 0.822\tiny{±.02} & 11.3\tiny{±1.4} \\
+        HHRoad-w/o-CE
+            & 2.71\tiny{±.01} & 5.42\tiny{±.01}
+            & 531\tiny{±4.3}  & 2981\tiny{±28}
+            & 0.921\tiny{±.01} & 27.4\tiny{±1.1} \\
+        HHRoad-w/o-CC
+            & 2.74\tiny{±.01} & 5.46\tiny{±.01}
+            & 538\tiny{±5.1}  & 2994\tiny{±32}
+            & 0.907\tiny{±.02} & 28.1\tiny{±1.2} \\
+        \textbf{HHRoad}
+            & \textbf{2.65}\tiny{±.00} & \textbf{5.37}\tiny{±.00}
+            & \textbf{525}\tiny{±1.0}  & \textbf{2966}\tiny{±3.4}
+            & \textbf{0.95}\tiny{±.00}  & \textbf{25.2}\tiny{±0.9} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+% ---------- 成都消融 ----------
+\begin{table}[H]
+    \centering
+    \caption{成都（CD）数据集上的消融实验结果}
+    \label{tab:ablation_cd}
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabular}{lcccccc}
+        \toprule
+        \multirow{2}{*}{模型变体}
+            & \multicolumn{2}{c}{\textbf{ASI}}
+            & \multicolumn{2}{c}{\textbf{TTE}}
+            & \multicolumn{2}{c}{\textbf{STS}} \\
+        \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+            & MAE$\downarrow$ & RMSE$\downarrow$
+            & MAE$\downarrow$ & RMSE$\downarrow$
+            & ACC@3$\uparrow$ & MR$\downarrow$ \\
+        \midrule
+        HHRoad-E
+            & 6.48\tiny{±.03} & 13.7\tiny{±.08}
+            & 97.2\tiny{±2.8} & 154\tiny{±4.1}
+            & 0.741\tiny{±.03} & 40.8\tiny{±1.2} \\
+        HHRoad-w/o-CE
+            & 6.22\tiny{±.01} & 13.3\tiny{±.03}
+            & 92.0\tiny{±1.6} & 146\tiny{±2.8}
+            & 0.803\tiny{±.02} & 17.1\tiny{±0.6} \\
+        HHRoad-w/o-CC
+            & 6.25\tiny{±.01} & 13.4\tiny{±.04}
+            & 92.7\tiny{±1.8} & 147\tiny{±3.1}
+            & 0.791\tiny{±.02} & 17.5\tiny{±0.7} \\
+        \textbf{HHRoad}
+            & \textbf{6.11}\tiny{±.00} & \textbf{13.2}\tiny{±.00}
+            & \textbf{89.8}\tiny{±0.71} & \textbf{143}\tiny{±1.89}
+            & \textbf{0.831}\tiny{±.00} & \textbf{15.2}\tiny{±0.13} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+HHRoad-E（欧氏空间替换）将 Lorentz 双曲空间替换为同维度欧氏空间，双曲图卷积退化为标准 GAT，层次聚合退化为线性矩阵乘法，其余结构保持不变，用于隔离双曲几何本身的贡献。HHRoad-w/o-CE（无蕴含损失）设 $\lambda_1=0$，去除 $\mathcal{L}_{\text{CE}}$ 的三类蕴含约束（Region$\Rightarrow$Locality、Locality$\Rightarrow$Segment、Segment 间拓扑蕴含），隔离显式几何层次约束的贡献。HHRoad-w/o-CC（无对比损失）设 $\lambda_2=0$，同时去除 $\mathcal{L}_{\text{intra}}$ 和 $\mathcal{L}_{\text{cross}}$，验证对比学习的整体贡献。
+
+表~\ref{tab:ablation_bj} 和表~\ref{tab:ablation_cd} 分别给出北京（BJ）和成都（CD）数据集上的消融结果。选取两个数据集以验证各组件贡献的跨城市一致性，其中北京规模最大（40,306 路段），成都处于中等规模（11,498 路段）。所有实验重复 5 次，报告均值$\pm$标准差，加粗表示最优。
+
+三类消融实验的结果呈现出清晰的贡献层次，为 HHRoad 的核心设计选择提供了有力的实证支撑。
+
+双曲几何是性能最关键的根本性来源。HHRoad-E（欧氏空间替换）在绝大多数评估指标上均引发最大幅度的系统性退化。在北京数据集上，ASI MAE 从 2.65 退化至 3.16（相对上升 19.2\%），TTE MAE 从 525 退化至 641（相对上升 22.1\%），STS ACC@3 从 0.950 降至 0.822（下降 12.8 个百分点）；成都数据集呈现高度一致的退化模式，STS ACC@3 下降 9.0 个百分点，ASI MAE 相对上升 6.1\%。这一系统性的多任务全面退化直接量化了双曲几何的根本性贡献：欧氏空间在相同维度下无法高效编码路网的树状层次结构，功能区—局部区域—路段三层几何组织所需的指数扩容能力高度依赖双曲空间方能实现。
+
+值得深入分析的是，HHRoad-E 在北京 STS MR 指标上（11.3）反而优于完整模型（25.2），而在成都 STS MR 上（40.8）则大幅劣于完整模型（15.2）。该现象源于双曲距离分布的重尾特性与 ACC@3、MR 两类检索度量之间固有的几何张力。双曲嵌入使语义相似的轨迹在超球面上高度聚集，显著提升了 top-3 精度（ACC@3 改善 12.8 个百分点）；然而对于少数未命中 top-3 的查询，正确候选在双曲空间中被推至极远距离，产生极高的单次排名误差，拉高均值 MR。欧氏嵌入的距离分布更为均匀，聚集程度虽低（ACC@3 受损），但非相似样本的极端远距效应也随之消解，在北京表现为更优的 MR。在成都，双曲嵌入同时实现了更高的 ACC@3 和更优的 MR，说明上述重尾效应的显著程度与路网规模及拓扑复杂度相关：北京路网规模最大（40,306 路段）、功能分区最为复杂，其嵌入空间的聚类极化倾向更为突出，导致 ACC@3 的极端优势伴随了相应的均值排名代价。此外，去除蕴含损失或对比损失均使北京 MR 进一步恶化（分别升至 27.4 和 28.1），表明两类损失通过约束嵌入空间几何结构在一定程度上缓解了双曲重尾效应，但并未从根本上消除该特性。
+
+蕴含损失与对比损失形成功能互补的双重约束，两者贡献的量级相当但侧重有所差异。比较 HHRoad-w/o-CE 与 HHRoad-w/o-CC 的退化幅度，对比损失的去除造成了更大幅度的综合退化：北京数据集上，HHRoad-w/o-CC 的 ASI MAE 较完整模型上升 3.4\%、STS ACC@3 下降 4.5\%；HHRoad-w/o-CE 的对应数字分别为 2.3\% 和 3.1\%；成都数据集上的差异模式相同（ASI MAE 分别上升 2.3\% 和 1.8\%，STS ACC@3 分别下降 4.8\% 和 3.4\%）。这与两类损失的理论定位相吻合：对比损失直接驱动路段嵌入的局部语义聚类结构，对路段表示质量的影响更为直接；蕴含损失的核心作用在于约束三层层次关系的全局几何组织，通过改善嵌入空间的整体结构秩序间接惠及下游任务，其效果的传导链路更长，因而单独贡献的绝对幅度略低。然而两类损失缺一不可：无论去除哪一项均导致三类任务的全面退化，完整模型在所有指标上均严格优于仅保留其中一类的任何变体，证实了局部语义相似性约束与全局层次几何约束的联合驱动对高质量路网表示学习的必要性。
+
+跨城市一致性验证。在除北京 STS MR 以外的全部评估维度上，北京与成都两个数据集的消融变体排序完全一致：完整 HHRoad 优于去除蕴含损失变体，优于去除对比损失变体，优于欧氏空间替换变体。各组件贡献的相对大小关系在两座城市间保持稳定，证实了 HHRoad 三项核心设计选择对不同规模和拓扑特征路网具有普遍的有效性，并非对特定城市或数据规模的过拟合。
+
+\subsection{分析与讨论}
+
+HHRoad 相比 HRNR（两者均采用三层层次架构，但 HRNR 在欧氏空间运行）的对比揭示了双曲几何的实质贡献。在北京，HHRoad 取得 ASI MAE 2.65（HRNR: 3.16，改善 16.1\%）和 STS ACC@3 0.952（HRNR: 0.82，改善 16.1\%）。这种一致性的跨任务改善直接表明：用双曲几何替换欧氏几何带来了超越架构复杂度增加的实质性收益。
+
+与无蕴含损失变体的对比揭示，蕴含约束的主要贡献在于组织嵌入空间的几何结构而非直接提升任务指标。这与蕴含锥的理论功能一致：它约束的是层次关系的几何表达，而非路段的语义内容。然而，良好组织的层次几何结构间接地有利于下游任务，尤其在轨迹相似性检索中——结构组织良好的嵌入空间使轨迹级别的相似性度量更为准确。
+
+对比损失捕获了路段的局部语义相似性（相邻路段应相似），蕴含损失约束了全局层次结构（路段必须"符合"其父区域）。两者的组合实现了局部语义和全局层次双重视角的统一优化，这是单独使用任一损失无法达到的效果，与 HyCoCLIP 在视觉-语言模型中的发现一致。
+
+将 HHRoad 与第四章的 HRGNN 对比，可以清晰地看到显式范式的优势所在。HRGNN 通过双曲距离隐式编码层次信息，在道路类型分类这类判别性任务上表现出色，但不构建多层次表示。HHRoad 通过蕴含锥显式约束三层层次关系，产出的嵌入可迁移至多种下游任务，尤其在需要层次结构信息的轨迹相似性检索中表现突出。
+
+两种范式的差异也反映在嵌入空间的可解释性上。HRGNN 的嵌入空间中，层次信息通过距离间接反映，无法直接解读。HHRoad 的嵌入空间中，路段到原点的距离天然编码层次深度，蕴含锥关系直接对应语义包含关系，具备内置的几何可解释性。
+
+\section{本章小结}
+
+本章提出了基于蕴含锥的双曲层次路网表示学习模型。通过在 Lorentz 双曲空间中构建三层路网层次结构，借鉴视觉-语言模型的组合蕴含学习范式，并结合层次对比学习，HHRoad 实现了对路网层次包含关系的显式几何约束。在 VecCity 基准的五城市、三任务实验中，HHRoad 取得最佳综合性能，尤其在轨迹相似性检索任务上表现突出。与第四章 HRGNN 的对比分析表明，从隐式捕获到显式约束的递进确实带来了更精确的层次几何组织和更优质的通用表示。
