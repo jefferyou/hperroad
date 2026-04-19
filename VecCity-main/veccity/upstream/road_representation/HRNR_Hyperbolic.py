@@ -60,6 +60,15 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         self.lambda_cc = config.get('lambda_cc', 0.1)  # 对比损失权重
         self.temperature = config.get('temperature', 0.07)  # 对比学习温度
 
+        # Sequence-branch task weights (MTR / TCL / align)
+        self.lambda_mtr = config.get('lambda_mtr', 0.1)
+        self.lambda_tcl = config.get('lambda_tcl', 0.1)
+        self.lambda_align = config.get('lambda_align', 0.1)
+        self.mtr_mask_ratio = config.get('mtr_mask_ratio', 0.15)
+        self.mtr_neg_samples = config.get('mtr_neg_samples', 512)
+        self.align_samples = config.get('align_samples', 500)
+        self.align_neg_samples = config.get('align_neg_samples', 64)
+
         # 双曲空间工具
         self.manifold = LorentzManifold()
         self.entailment_cone = EntailmentCone(self.manifold)
@@ -152,6 +161,104 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         self.seq_token_hyp_emb = token_hyp
         self.traj_hyp_emb = traj_hyp
         return token_hyp, traj_hyp
+
+    def compute_seq_losses(self, seq, pad_mask):
+        """
+        Sequence 分支三个多样化预训练任务:
+          - L_MTR  : masked trajectory recovery (sampled softmax 在 segment 全集上)
+          - L_TCL  : trajectory-level InfoNCE  (view A vs view B, 对称)
+          - L_align: segment-level graph<->sequence alignment (InfoNCE)
+        Args:
+            seq:      [B, T] long
+            pad_mask: [B, T] bool (True 为有效)
+        Returns:
+            (L_MTR, L_TCL, L_align) — 每个都是 scalar tensor
+        """
+        zero = torch.zeros((), device=self.device)
+        if self.traj_encoder is None:
+            return zero, zero, zero
+
+        # graph 前向已在 encode() 被调用；兜底
+        if self.graph_enc.segment_hyp_emb is None:
+            _ = self.graph_enc(
+                self.node_feature, self.type_feature,
+                self.length_feature, self.lane_feature, self.adj,
+            )
+        segment_emb = self.graph_enc.segment_hyp_emb        # [N, d+1]
+        N = segment_emb.shape[0]
+        B, T = seq.shape
+        tau = self.temperature
+
+        # ---------- view A (unmasked) ----------
+        token_A, traj_A = self.traj_encoder(segment_emb, seq, pad_mask)
+        self.seq_token_hyp_emb = token_A
+        self.traj_hyp_emb = traj_A
+
+        # ---------- view B (masked) ----------
+        rand = torch.rand(B, T, device=self.device)
+        mask_positions = pad_mask & (rand < self.mtr_mask_ratio)  # [B, T]
+        token_B, traj_B = self.traj_encoder(
+            segment_emb, seq, pad_mask, mask_positions=mask_positions
+        )
+
+        # ==================== L_MTR ====================
+        mp = mask_positions.nonzero(as_tuple=False)  # [P, 2]
+        P = mp.shape[0]
+        if P > 0:
+            anchor = token_B[mp[:, 0], mp[:, 1]]              # [P, d+1]
+            pos_ids = seq[mp[:, 0], mp[:, 1]].clamp(max=N - 1)
+            pos_emb = segment_emb[pos_ids]                    # [P, d+1]
+
+            K = min(self.mtr_neg_samples, N)
+            neg_ids = torch.randint(0, N, (K,), device=self.device)
+            neg_emb = segment_emb[neg_ids]                    # [K, d+1]
+
+            pos_dist = self.manifold.lorentz_distance(anchor, pos_emb)     # [P]
+            neg_dist = self.manifold.pairwise_lorentz_distance(anchor, neg_emb)  # [P, K]
+            logits = torch.cat([-pos_dist.unsqueeze(1), -neg_dist], dim=1) / tau
+            labels = torch.zeros(P, dtype=torch.long, device=self.device)
+            L_MTR = F.cross_entropy(logits, labels)
+        else:
+            L_MTR = zero
+
+        # ==================== L_TCL ====================
+        # 对称 InfoNCE: traj_A[i] 与 traj_B[i] 为正对, 其他轨迹为负
+        if B > 1:
+            dist_ab = self.manifold.pairwise_lorentz_distance(traj_A, traj_B)  # [B, B]
+            logits_ab = -dist_ab / tau
+            labels_b = torch.arange(B, device=self.device)
+            L_TCL = 0.5 * (
+                F.cross_entropy(logits_ab, labels_b)
+                + F.cross_entropy(logits_ab.t(), labels_b)
+            )
+        else:
+            L_TCL = zero
+
+        # ==================== L_align ====================
+        # graph-view segment_emb[seq] 与 seq-view token_A[pos] 对齐
+        valid = pad_mask.nonzero(as_tuple=False)  # [V, 2]
+        V = valid.shape[0]
+        if V > 0:
+            S = min(self.align_samples, V)
+            sel = torch.randperm(V, device=self.device)[:S]
+            vb = valid[sel]
+            anchor = token_A[vb[:, 0], vb[:, 1]]              # [S, d+1]
+            pos_ids = seq[vb[:, 0], vb[:, 1]].clamp(max=N - 1)
+            pos_emb = segment_emb[pos_ids]                    # [S, d+1]
+
+            K = min(self.align_neg_samples, N)
+            neg_ids = torch.randint(0, N, (K,), device=self.device)
+            neg_emb = segment_emb[neg_ids]                    # [K, d+1]
+
+            pos_dist = self.manifold.lorentz_distance(anchor, pos_emb)        # [S]
+            neg_dist = self.manifold.pairwise_lorentz_distance(anchor, neg_emb)  # [S, K]
+            logits = torch.cat([-pos_dist.unsqueeze(1), -neg_dist], dim=1) / tau
+            labels = torch.zeros(S, dtype=torch.long, device=self.device)
+            L_align = F.cross_entropy(logits, labels)
+        else:
+            L_align = zero
+
+        return L_MTR, L_TCL, L_align
 
     def _save_final_embeddings(self):
         """在训练结束时保存最终的embeddings"""
@@ -349,7 +456,10 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                 # 对比损失
                 loss_cc = self.compute_contrastive_loss()
 
-                # Sequence 分支前向 (step 1 仅前向传播，不参与 loss；下一步接 MTR/TCL/align)
+                # Sequence 分支: MTR / TCL / align 多任务
+                loss_mtr = torch.zeros((), device=self.device)
+                loss_tcl = torch.zeros((), device=self.device)
+                loss_align = torch.zeros((), device=self.device)
                 if self.traj_encoder is not None:
                     traj_batch = get_next(traj_iter)
                     if traj_batch is None:
@@ -359,11 +469,17 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                         seq_b, mask_b = traj_batch
                         seq_b = seq_b.to(self.device)
                         mask_b = mask_b.to(self.device).bool()
-                        # 前向即可；嵌入缓存到 self.seq_token_hyp_emb / self.traj_hyp_emb
-                        self.traj_encode(seq_b, mask_b)
+                        loss_mtr, loss_tcl, loss_align = self.compute_seq_losses(seq_b, mask_b)
 
                 # 总损失
-                loss = loss_struct + self.lambda_ce * loss_ce + self.lambda_cc * loss_cc
+                loss = (
+                    loss_struct
+                    + self.lambda_ce * loss_ce
+                    + self.lambda_cc * loss_cc
+                    + self.lambda_mtr * loss_mtr
+                    + self.lambda_tcl * loss_tcl
+                    + self.lambda_align * loss_align
+                )
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), hparams.lp_clip)
@@ -427,8 +543,12 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                     self._logger.info("max_auc: " + str(max_auc))
                     self._logger.info("max_f1: " + str(max_f1))
                     self._logger.info("step " + str(count))
-                    self._logger.info(f"loss: {loss.item()}, struct: {loss_struct.item()}, "
-                                    f"ce: {loss_ce.item()}, cc: {loss_cc.item()}")
+                    self._logger.info(
+                        f"loss: {loss.item()}, struct: {loss_struct.item()}, "
+                        f"ce: {loss_ce.item()}, cc: {loss_cc.item()}, "
+                        f"mtr: {loss_mtr.item()}, tcl: {loss_tcl.item()}, "
+                        f"align: {loss_align.item()}"
+                    )
                 count += 1
 
         # 训练正常结束，保存最终的embeddings
@@ -699,6 +819,10 @@ class HyperbolicTrajEncoder(nn.Module):
         self.pos_emb = nn.Parameter(torch.zeros(max_len, d))
         nn.init.trunc_normal_(self.pos_emb, std=0.02)
 
+        # Learnable [MASK] token in tangent space (space dims only)
+        self.mask_tangent = nn.Parameter(torch.zeros(d))
+        nn.init.trunc_normal_(self.mask_tangent, std=0.02)
+
         enc_layer = nn.TransformerEncoderLayer(
             d_model=d,
             nhead=n_heads,
@@ -710,12 +834,13 @@ class HyperbolicTrajEncoder(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
 
-    def forward(self, segment_hyp_emb, seq, pad_mask):
+    def forward(self, segment_hyp_emb, seq, pad_mask, mask_positions=None):
         """
         Args:
             segment_hyp_emb: [N, d+1] graph-view Lorentz 嵌入
             seq:             [B, T] long (含 pad_idx)
             pad_mask:        [B, T] bool, True 为有效位
+            mask_positions:  [B, T] bool or None. True 处用可学习 [MASK] 替换（仅影响有效位）
         Returns:
             token_hyp: [B, T, d+1]  Lorentz 空间逐位置嵌入
             traj_hyp:  [B, d+1]     Lorentz 空间轨迹级嵌入
@@ -728,6 +853,11 @@ class HyperbolicTrajEncoder(nn.Module):
         # 原点切空间
         v = self.manifold.origin_log_map(h)                 # [B, T, d+1], v[..., 0] == 0
         v_space = v[..., 1:]                                # [B, T, d]
+
+        # [MASK] 替换（在加 pos_emb 之前）
+        if mask_positions is not None:
+            mf = mask_positions.unsqueeze(-1).float()       # [B, T, 1]
+            v_space = v_space * (1.0 - mf) + self.mask_tangent.view(1, 1, -1) * mf
 
         T = v_space.shape[1]
         v_space = v_space + self.pos_emb[:T].unsqueeze(0)   # broadcast 到 [B, T, d]

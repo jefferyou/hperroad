@@ -70,12 +70,21 @@
     "curvature": 1.0,
     "max_epoch": 100,
 
-    "_comment_seq": "=== Sequence branch (step 1: forward wiring only) ===",
+    "_comment_seq": "=== Sequence branch (step 1: forward wiring) ===",
     "use_sequence_branch": true,
     "min_len": 10,
     "max_len": 128,
     "traj_batch_size": 64,
     "traj_n_layers": 2,
     "traj_n_heads": 4,
-    "traj_dropout": 0.1
+    "traj_dropout": 0.1,
+
+    "_comment_seq_tasks": "=== Sequence branch (step 2: MTR / TCL / align) ===",
+    "lambda_mtr": 0.1,
+    "lambda_tcl": 0.1,
+    "lambda_align": 0.1,
+    "mtr_mask_ratio": 0.15,
+    "mtr_neg_samples": 512,
+    "align_samples": 500,
+    "align_neg_samples": 64
 }
