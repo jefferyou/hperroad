@@ -144,132 +144,128 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
 
     def compute_entailment_loss(self):
         """
-        计算蕴含损失
-        定义三类蕴含关系：
-        1. Region蕴含Locality
-        2. Locality蕴含Segment
-        3. 拓扑连接的Segment互相蕴含
+        计算蕴含损失 (批量向量化版本)
+        三类蕴含关系：
+        1. Region 蕴含 Locality
+        2. Locality 蕴含 Segment (采样)
+        3. 拓扑连接的 Segment 互相蕴含 (采样)
         """
-        loss = 0.0
-        count = 0
+        segment_emb = self.graph_enc.segment_hyp_emb      # [N, d+1]
+        locality_emb = self.graph_enc.locality_hyp_emb    # [N_loc, d+1]
+        region_emb = self.graph_enc.region_hyp_emb        # [N_reg, d+1]
 
-        # 获取三个层次的嵌入
-        segment_emb = self.graph_enc.segment_hyp_emb  # [N, d+1]
-        locality_emb = self.graph_enc.locality_hyp_emb  # [N_locality, d+1]
-        region_emb = self.graph_enc.region_hyp_emb  # [N_region, d+1]
+        # 1. Region -> Locality: 所有 fnc_assign[loc, reg] > 0 的对
+        rl_pairs = (self.fnc_assign > 0).nonzero(as_tuple=False)  # [K, 2]: (loc, reg)
+        if rl_pairs.numel() > 0:
+            parents = region_emb[rl_pairs[:, 1]]
+            children = locality_emb[rl_pairs[:, 0]]
+            scores = self.entailment_cone.batched_entailment_score(parents, children)
+            loss_rl = F.relu(-scores).mean()
+        else:
+            loss_rl = torch.zeros((), device=self.device)
 
-        # 1. Region蕴含Locality
-        # 使用fnc_assign构建关系
-        region_to_locality = self.fnc_assign.t()  # [N_region, N_locality]
-        for i in range(region_emb.shape[0]):
-            # 找到属于该region的locality
-            localities_idx = (region_to_locality[i] > 0).nonzero(as_tuple=True)[0]
-            if len(localities_idx) > 0:
-                for loc_idx in localities_idx:
-                    # region应该蕴含locality
-                    score = self.entailment_cone.entailment_score(
-                        region_emb[i:i+1], locality_emb[loc_idx:loc_idx+1]
-                    )
-                    # 蕴含损失：如果score<0，则不在锥内，产生损失
-                    loss += F.relu(-score).mean()
-                    count += 1
+        # 2. Locality -> Segment: 全部对中采样一批
+        ls_pairs = (self.struct_assign > 0).nonzero(as_tuple=False)  # [K', 2]: (seg, loc)
+        if ls_pairs.numel() > 0:
+            max_samples = 10 * locality_emb.shape[0]
+            n_pairs = ls_pairs.shape[0]
+            n_sample = min(max_samples, n_pairs)
+            sel = torch.randperm(n_pairs, device=self.device)[:n_sample]
+            sampled = ls_pairs[sel]
+            parents = locality_emb[sampled[:, 1]]
+            children = segment_emb[sampled[:, 0]]
+            scores = self.entailment_cone.batched_entailment_score(parents, children)
+            loss_ls = F.relu(-scores).mean()
+        else:
+            loss_ls = torch.zeros((), device=self.device)
 
-        # 2. Locality蕴含Segment
-        locality_to_segment = self.struct_assign.t()  # [N_locality, N]
-        for i in range(locality_emb.shape[0]):
-            segments_idx = (locality_to_segment[i] > 0).nonzero(as_tuple=True)[0]
-            if len(segments_idx) > 0:
-                # 采样一部分segment避免计算量过大
-                sample_size = min(10, len(segments_idx))
-                sampled_idx = segments_idx[torch.randperm(len(segments_idx))[:sample_size]]
-                for seg_idx in sampled_idx:
-                    score = self.entailment_cone.entailment_score(
-                        locality_emb[i:i+1], segment_emb[seg_idx:seg_idx+1]
-                    )
-                    loss += F.relu(-score).mean()
-                    count += 1
-
-        # 3. 拓扑连接的Segment互相蕴含
+        # 3. Segment <-> Segment: 采样邻接边
         edge_indices = self.adj.indices()
-        # 采样部分边
         num_edges = edge_indices.shape[1]
-        sample_edges = min(1000, num_edges)
-        sampled_edge_idx = torch.randperm(num_edges)[:sample_edges]
-
-        for idx in sampled_edge_idx:
-            i, j = edge_indices[:, idx]
-            # 互相蕴含
-            score_ij = self.entailment_cone.entailment_score(
-                segment_emb[i:i+1], segment_emb[j:j+1]
+        if num_edges > 0:
+            sample_edges = min(1000, num_edges)
+            sel = torch.randperm(num_edges, device=self.device)[:sample_edges]
+            i_idx = edge_indices[0, sel]
+            j_idx = edge_indices[1, sel]
+            scores_ij = self.entailment_cone.batched_entailment_score(
+                segment_emb[i_idx], segment_emb[j_idx]
             )
-            score_ji = self.entailment_cone.entailment_score(
-                segment_emb[j:j+1], segment_emb[i:i+1]
+            scores_ji = self.entailment_cone.batched_entailment_score(
+                segment_emb[j_idx], segment_emb[i_idx]
             )
-            loss += F.relu(-score_ij).mean() + F.relu(-score_ji).mean()
-            count += 2
+            loss_ss = (F.relu(-scores_ij).mean() + F.relu(-scores_ji).mean()) * 0.5
+        else:
+            loss_ss = torch.zeros((), device=self.device)
 
-        return loss / (count + 1e-7)
+        return (loss_rl + loss_ls + loss_ss) / 3.0
 
     def compute_contrastive_loss(self):
         """
-        计算层次对比学习损失
-        1. Segment层：相邻路段为正对，非邻路段为负对
-        2. 跨层：Segment与其所属Locality为正对
+        层次对比学习损失 (批量向量化 InfoNCE)
+        1. Segment 层: 相邻为正对, 共享随机负样本池
+        2. 跨层: Locality 与其所属 Segment 为正对, 共享负样本池
         """
-        loss = 0.0
+        segment_emb = self.graph_enc.segment_hyp_emb         # [N, d+1]
+        locality_emb = self.graph_enc.locality_hyp_emb       # [N_loc, d+1]
 
-        segment_emb = self.graph_enc.segment_hyp_emb
-        locality_emb = self.graph_enc.locality_hyp_emb
+        neg_pool_size = 64
+        losses = []
 
-        # 1. Segment层对比
+        # 1. Segment 层 InfoNCE
         edge_indices = self.adj.indices()
         num_edges = edge_indices.shape[1]
-        sample_edges = min(500, num_edges)
-        sampled_edge_idx = torch.randperm(num_edges)[:sample_edges]
+        if num_edges > 0:
+            B = min(500, num_edges)
+            sel = torch.randperm(num_edges, device=self.device)[:B]
+            anchors = edge_indices[0, sel]
+            positives = edge_indices[1, sel]
 
-        for idx in sampled_edge_idx:
-            anchor, pos = edge_indices[:, idx]
-            # 计算anchor与pos的相似度（负距离）
-            pos_sim = -self.manifold.lorentz_distance(
-                segment_emb[anchor:anchor+1], segment_emb[pos:pos+1]
-            ).flatten() / self.temperature
+            anchor_emb = segment_emb[anchors]                # [B, d+1]
+            pos_emb = segment_emb[positives]                 # [B, d+1]
 
-            # 随机采样负样本
-            neg_samples = torch.randint(0, segment_emb.shape[0], (10,), device=self.device)
-            neg_sim = -self.manifold.lorentz_distance(
-                segment_emb[anchor:anchor+1], segment_emb[neg_samples]
-            ).flatten() / self.temperature
+            neg_idx = torch.randint(
+                0, segment_emb.shape[0], (neg_pool_size,), device=self.device
+            )
+            neg_emb = segment_emb[neg_idx]                   # [K, d+1]
 
-            # InfoNCE loss
-            logits = torch.cat([pos_sim, neg_sim], dim=0)
-            labels = torch.zeros(1, dtype=torch.long, device=self.device)
-            loss += F.cross_entropy(logits.unsqueeze(0), labels)
+            pos_dist = self.manifold.lorentz_distance(anchor_emb, pos_emb)     # [B]
+            neg_dist = self.manifold.pairwise_lorentz_distance(anchor_emb, neg_emb)  # [B, K]
 
-        # 2. 跨层对比
-        locality_to_segment = self.struct_assign.t()
-        num_localities = min(50, locality_emb.shape[0])
-        sampled_localities = torch.randperm(locality_emb.shape[0])[:num_localities]
+            logits = torch.cat(
+                [-pos_dist.unsqueeze(1), -neg_dist], dim=1
+            ) / self.temperature                             # [B, K+1]
+            labels = torch.zeros(B, dtype=torch.long, device=self.device)
+            losses.append(F.cross_entropy(logits, labels))
 
-        for loc_idx in sampled_localities:
-            segments_idx = (locality_to_segment[loc_idx] > 0).nonzero(as_tuple=True)[0]
-            if len(segments_idx) > 0:
-                # 随机选一个segment作为正样本
-                pos_seg = segments_idx[torch.randint(0, len(segments_idx), (1,))].item()
-                pos_sim = -self.manifold.lorentz_distance(
-                    locality_emb[loc_idx:loc_idx+1], segment_emb[pos_seg:pos_seg+1]
-                ).flatten() / self.temperature
+        # 2. 跨层 InfoNCE (Locality anchor <-> Segment positive)
+        ls_pairs = (self.struct_assign > 0).nonzero(as_tuple=False)  # [K', 2]: (seg, loc)
+        if ls_pairs.numel() > 0:
+            M = min(500, ls_pairs.shape[0])
+            sel = torch.randperm(ls_pairs.shape[0], device=self.device)[:M]
+            sampled = ls_pairs[sel]
+            pos_seg_idx = sampled[:, 0]
+            anchor_loc_idx = sampled[:, 1]
 
-                # 随机采样负样本
-                neg_samples = torch.randint(0, segment_emb.shape[0], (10,), device=self.device)
-                neg_sim = -self.manifold.lorentz_distance(
-                    locality_emb[loc_idx:loc_idx+1], segment_emb[neg_samples]
-                ).flatten() / self.temperature
+            anchor_emb = locality_emb[anchor_loc_idx]        # [M, d+1]
+            pos_emb = segment_emb[pos_seg_idx]               # [M, d+1]
 
-                logits = torch.cat([pos_sim, neg_sim], dim=0)
-                labels = torch.zeros(1, dtype=torch.long, device=self.device)
-                loss += F.cross_entropy(logits.unsqueeze(0), labels)
+            neg_idx = torch.randint(
+                0, segment_emb.shape[0], (neg_pool_size,), device=self.device
+            )
+            neg_emb = segment_emb[neg_idx]                   # [K, d+1]
 
-        return loss / (sample_edges + num_localities + 1e-7)
+            pos_dist = self.manifold.lorentz_distance(anchor_emb, pos_emb)     # [M]
+            neg_dist = self.manifold.pairwise_lorentz_distance(anchor_emb, neg_emb)  # [M, K]
+
+            logits = torch.cat(
+                [-pos_dist.unsqueeze(1), -neg_dist], dim=1
+            ) / self.temperature
+            labels = torch.zeros(M, dtype=torch.long, device=self.device)
+            losses.append(F.cross_entropy(logits, labels))
+
+        if len(losses) == 0:
+            return torch.zeros((), device=self.device)
+        return torch.stack(losses).mean()
 
     def run(self, train_dataloader, eval_dataloader):
         """训练循环"""
@@ -303,7 +299,7 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                 # 总损失
                 loss = loss_struct + self.lambda_ce * loss_ce + self.lambda_cc * loss_cc
 
-                loss.backward(retain_graph=True)
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), hparams.lp_clip)
                 model_optimizer.step()
 
@@ -491,8 +487,7 @@ class HyperbolicGraphEncoderTL(Module):
 
     def _aggregate_hyperbolic(self, embeddings, assignment_matrix):
         """
-        在双曲空间中聚合嵌入
-        优化版本：使用批量矩阵操作替代循环
+        在双曲空间中聚合嵌入（原点切空间加权质心）
 
         Args:
             embeddings: [N, d+1] 双曲嵌入
@@ -500,31 +495,7 @@ class HyperbolicGraphEncoderTL(Module):
         Returns:
             aggregated: [M, d+1] 聚合后的双曲嵌入
         """
-        # 归一化分配矩阵的每一行（确保每个聚类的权重和为1）
-        row_sums = assignment_matrix.sum(dim=1, keepdim=True) + 1e-7
-        normalized_assignment = assignment_matrix / row_sums  # [M, N]
-
-        # 方法1：简化版 - 在切空间中聚合
-        # 映射到切空间（使用原点作为参考点）
-        origin = torch.zeros_like(embeddings[0])
-        origin[0] = 1.0
-
-        # 批量映射到切空间
-        tangent_embeddings = self.manifold.log_map(
-            origin.unsqueeze(0).expand(embeddings.shape[0], -1),
-            embeddings
-        )  # [N, d+1]
-
-        # 使用矩阵乘法进行加权聚合
-        aggregated_tangent = torch.matmul(normalized_assignment, tangent_embeddings)  # [M, d+1]
-
-        # 批量映射回双曲空间
-        aggregated = self.manifold.exp_map(
-            origin.unsqueeze(0).expand(aggregated_tangent.shape[0], -1),
-            aggregated_tangent
-        )  # [M, d+1]
-
-        return aggregated
+        return self.manifold.weighted_centroid_at_origin(embeddings, assignment_matrix)
 
 
 class HyperbolicGraphEncoderTLCore(Module):
@@ -588,8 +559,8 @@ class HyperbolicGraphEncoderTLCore(Module):
 
         # F2C: Region -> Locality
         fnc_message = self._distribute_from_cluster(fnc_emb, self.fnc_assign, fnc_assign_norm)
-        r_f = self.sigmoid(self.l_c(torch.cat((struct_emb, fnc_message), 1)))
-        struct_emb = self._hyperbolic_update(struct_emb, fnc_message, weight=0.15)
+        r_f = self.sigmoid(self.l_c(torch.cat((struct_emb, fnc_message), 1)))  # [N_loc, 1]
+        struct_emb = self._hyperbolic_update(struct_emb, fnc_message, weight=r_f)
 
         # C2C: Locality内部消息传递
         struct_adj_processed = F.relu(struct_adj - torch.eye(struct_adj.shape[1]).to(self.device) * 10000.0) + \
@@ -598,8 +569,8 @@ class HyperbolicGraphEncoderTLCore(Module):
 
         # C2N: Locality -> Segment
         struct_message = self._distribute_from_cluster(struct_emb, self.struct_assign, struct_assign_norm)
-        r_s = self.sigmoid(self.l_s(torch.cat((hyp_feat, struct_message), 1)))
-        hyp_feat = self._hyperbolic_update(hyp_feat, struct_message, weight=0.5)
+        r_s = self.sigmoid(self.l_s(torch.cat((hyp_feat, struct_message), 1)))  # [N, 1]
+        hyp_feat = self._hyperbolic_update(hyp_feat, struct_message, weight=r_s)
 
         # N2N: Segment内部消息传递
         hyp_feat = self.node_gcn(hyp_feat, raw_adj)
@@ -607,25 +578,23 @@ class HyperbolicGraphEncoderTLCore(Module):
         return hyp_feat
 
     def _aggregate_to_cluster(self, embeddings, assignment_matrix):
-        """聚合到聚类中心（双曲空间）"""
-        # 简化版：直接使用矩阵乘法聚合空间部分
-        spatial_part = embeddings[:, 1:]  # [N, d]
-        cluster_spatial = torch.mm(assignment_matrix.t(), spatial_part)  # [M, d]
-        # 投影回双曲空间
-        cluster_hyp = self.manifold.project_to_lorentz(cluster_spatial)
-        return cluster_hyp
+        """
+        聚合到聚类中心（双曲空间，原点切空间加权质心）
+        assignment_matrix: [N, M] (node -> cluster)
+        returns: [M, d+1]
+        """
+        return self.manifold.weighted_centroid_at_origin(
+            embeddings, assignment_matrix.t()
+        )
 
-    def _distribute_from_cluster(self, cluster_emb, raw_assign, norm_assign):
-        """从聚类分发到节点（双曲空间）"""
-        # 简化版：使用矩阵乘法分发
-        cluster_spatial = cluster_emb[:, 1:]
-        node_spatial = torch.mm(raw_assign, cluster_spatial)
-        # 归一化
-        node_spatial = torch.div(node_spatial,
-                                (F.relu(torch.sum(norm_assign, 1) - 1.0) + 1.0).unsqueeze(1))
-        # 投影回双曲空间
-        node_hyp = self.manifold.project_to_lorentz(node_spatial)
-        return node_hyp
+    def _distribute_from_cluster(self, cluster_emb, raw_assign, norm_assign=None):
+        """
+        从聚类分发到节点（双曲空间，原点切空间加权质心）
+        cluster_emb: [M, d+1]
+        raw_assign:  [N, M] (node -> cluster)
+        returns:     [N, d+1]
+        """
+        return self.manifold.weighted_centroid_at_origin(cluster_emb, raw_assign)
 
     def _hyperbolic_update(self, x, message, weight=0.5):
         """
@@ -641,17 +610,9 @@ class HyperbolicGraphEncoderTLCore(Module):
         return updated
 
     def _compute_hyperbolic_affinity(self, embeddings):
-        """计算双曲空间中的亲和度矩阵"""
-        # 使用负距离作为相似度
-        N = embeddings.shape[0]
-        affinity = torch.zeros(N, N, device=self.device)
-        for i in range(N):
-            for j in range(N):
-                dist = self.manifold.lorentz_distance(
-                    embeddings[i:i+1], embeddings[j:j+1]
-                )
-                affinity[i, j] = torch.exp(-dist)
-        return affinity
+        """计算双曲空间中的亲和度矩阵（批量 Minkowski）"""
+        dist = self.manifold.pairwise_lorentz_distance(embeddings, embeddings)
+        return torch.exp(-dist)
 
 
 # ========== 辅助函数和类 ==========

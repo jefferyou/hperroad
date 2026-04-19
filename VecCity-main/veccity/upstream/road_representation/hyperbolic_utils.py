@@ -29,8 +29,10 @@ class LorentzManifold:
         Returns:
             <x,y> = -x_0*y_0 + sum(x_i*y_i for i>0)
         """
-        res = torch.sum(x * y, dim=-1, keepdim=keepdim)
-        res = res - 2 * x[..., 0:1] * y[..., 0:1]
+        # 保持最后一维为 1 做运算，避免 [N] 与 [N, 1] 的错位广播
+        res = torch.sum(x * y, dim=-1, keepdim=True) - 2 * x[..., 0:1] * y[..., 0:1]
+        if not keepdim:
+            res = res.squeeze(-1)
         return res
 
     def lorentz_distance(self, x, y):
@@ -135,6 +137,84 @@ class LorentzManifold:
         # 使用log和exp实现
         v = self.log_map(x, y)
         return self.exp_map(x, v)
+
+    # ================= Batched / Vectorized helpers =================
+
+    def pairwise_minkowski_dot(self, X, Y):
+        """
+        批量 Minkowski 内积
+        Args:
+            X: [N, d+1]
+            Y: [M, d+1]
+        Returns:
+            M_xy: [N, M], where M_xy[i, j] = <X_i, Y_j>_L
+        """
+        time_part = -X[:, 0:1] * Y[:, 0:1].t()          # [N, M]
+        space_part = X[:, 1:] @ Y[:, 1:].t()            # [N, M]
+        return time_part + space_part
+
+    def pairwise_lorentz_distance(self, X, Y):
+        """
+        批量 Lorentz 距离: d(x, y) = arcosh(-<x, y>_L)
+        Args:
+            X: [N, d+1], Y: [M, d+1]
+        Returns:
+            D: [N, M]
+        """
+        md = self.pairwise_minkowski_dot(X, Y)
+        val = torch.clamp(-md, min=1.0 + self.eps)
+        return torch.acosh(val)
+
+    def origin_log_map(self, x):
+        """
+        在原点 o = [1, 0, ..., 0] 处的对数映射，保留时间分量=0。
+        Args:
+            x: [..., d+1]
+        Returns:
+            v: [..., d+1] (v[..., 0] == 0)
+        """
+        x0 = torch.clamp(x[..., 0:1], min=1.0 + self.eps)
+        dist = torch.acosh(x0)
+        sp = x[..., 1:]
+        sp_norm = torch.sqrt(torch.clamp((x0 * x0 - 1.0), min=self.min_norm))
+        v_space = dist * sp / sp_norm
+        v_time = torch.zeros_like(x0)
+        return torch.cat([v_time, v_space], dim=-1)
+
+    def origin_exp_map(self, v):
+        """
+        在原点处的指数映射。约定 v[..., 0] == 0。
+        Args:
+            v: [..., d+1]
+        Returns:
+            y: [..., d+1] on the manifold
+        """
+        v_space = v[..., 1:]
+        v_norm = torch.sqrt(torch.clamp(
+            torch.sum(v_space * v_space, dim=-1, keepdim=True),
+            min=self.min_norm,
+        ))
+        y_time = torch.cosh(v_norm)
+        y_space = torch.sinh(v_norm) * v_space / v_norm
+        return torch.cat([y_time, y_space], dim=-1)
+
+    def weighted_centroid_at_origin(self, embeddings, weight_matrix):
+        """
+        原点切空间加权聚合（等价于在原点处的 Karcher 均值一阶近似）。
+        比 "丢时间分量再 project_to_lorentz" 几何上正确。
+
+        Args:
+            embeddings: [N, d+1] 流形上的点
+            weight_matrix: [M, N] 每行为一个簇的权重（会被行归一化）
+        Returns:
+            aggregated: [M, d+1] 流形上的点
+        """
+        row_sum = weight_matrix.sum(dim=1, keepdim=True) + self.eps
+        w = weight_matrix / row_sum                               # [M, N]
+        tangent = self.origin_log_map(embeddings)                 # [N, d+1]
+        aggregated_tangent = w @ tangent                          # [M, d+1]
+        aggregated_tangent[..., 0] = 0.0                          # 保持时间分量 0
+        return self.origin_exp_map(aggregated_tangent)
 
 
 class HyperbolicEmbedding(nn.Module):
@@ -244,6 +324,29 @@ class EntailmentCone:
         # score = theta_p - angle (如果为正，则child在锥内)
         score = theta_p - angle
         return score
+
+    def batched_entailment_score(self, parents, children):
+        """
+        批量蕴含分数，支持 (parents[i], children[i]) 逐对匹配。
+        Args:
+            parents:  [B, d+1]
+            children: [B, d+1]
+        Returns:
+            scores: [B]
+        """
+        theta_p = self.aperture_angle(parents).squeeze(-1)           # [B]
+
+        md = self.manifold.minkowski_dot(parents, children, keepdim=False)  # [B]
+        p_norm_sq = -self.manifold.minkowski_dot(parents, parents, keepdim=False)
+        c_norm_sq = -self.manifold.minkowski_dot(children, children, keepdim=False)
+        p_norm = torch.sqrt(torch.clamp(p_norm_sq, min=self.eps))
+        c_norm = torch.sqrt(torch.clamp(c_norm_sq, min=self.eps))
+
+        cos_angle = md / (p_norm * c_norm + self.eps)
+        cos_angle = torch.clamp(cos_angle, -1.0 + self.eps, 1.0 - self.eps)
+        angle = torch.acos(cos_angle)
+
+        return theta_p - angle
 
 
 class HyperbolicGraphConv(nn.Module):
