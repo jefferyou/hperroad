@@ -65,6 +65,14 @@ class HRNRDataset(AbstractDataset):
         self.trans_matrix = self.cal_trans_matrix()
         self._calc_transfer_matrix()
 
+        # 可选：构建 trajectory dataloader（供 HRNR_Hyperbolic 的 sequence 分支使用）
+        self.traj_dataloader = None
+        self.traj_pad_idx = self.num_nodes
+        self.max_len = self.config.get("max_len", 128)
+        self.min_len = self.config.get("min_len", 10)
+        if self.config.get("use_sequence_branch", False):
+            self._build_traj_dataloader()
+
         self._logger.info("Dataset initialization Done.")
         self._logger.info("num_nodes: " + str(self.num_nodes))
         self._logger.info("lane_num: " + str(self.lane_num))
@@ -434,6 +442,56 @@ class HRNRDataset(AbstractDataset):
 
         return TRZ
 
+    def _build_traj_dataloader(self):
+        """
+        读取 traj_road_train.csv，按 [min_len, max_len) 过滤，用 num_nodes 做 PAD，
+        生成 (seq, pad_mask) 的 DataLoader，供 sequence 分支消费。
+        """
+        data_cache_dir = os.path.join(cache_dir, self.dataset)
+        train_path = os.path.join(data_cache_dir, "traj_road_train.csv")
+        if not os.path.exists(train_path):
+            self._logger.warning(
+                f"use_sequence_branch=True 但未找到 {train_path}，sequence 分支禁用。"
+            )
+            return
+
+        df = pd.read_csv(train_path)
+        traj_list = []
+        for i in tqdm(range(len(df)), desc="loading trajectories"):
+            path = df.loc[i, "path"]
+            path = path[1:len(path) - 1].split(",")
+            try:
+                path = [int(s) for s in path]
+            except ValueError:
+                continue
+            if self.min_len < len(path) < self.max_len:
+                # 截断越界的 id，避免脏数据污染下游嵌入查表
+                path = [p for p in path if 0 <= p < self.num_nodes]
+                if self.min_len < len(path) < self.max_len:
+                    traj_list.append(path)
+
+        if len(traj_list) == 0:
+            self._logger.warning("过滤后无可用轨迹，sequence 分支禁用。")
+            return
+
+        # Pad with num_nodes
+        seq_arr = np.full([len(traj_list), self.max_len], self.traj_pad_idx, dtype=np.int64)
+        for i, p in enumerate(traj_list):
+            seq_arr[i, :len(p)] = np.array(p, dtype=np.int64)
+        mask_arr = (seq_arr != self.traj_pad_idx).astype(np.bool_)
+
+        seq_tensor = torch.from_numpy(seq_arr)
+        mask_tensor = torch.from_numpy(mask_arr)
+        ds = TensorDataset(seq_tensor, mask_tensor)
+        batch_size = self.config.get("traj_batch_size", self.config.get("batch_size", 64))
+        self.traj_dataloader = DataLoader(
+            ds, batch_size=batch_size, shuffle=True, drop_last=True
+        )
+        self._logger.info(
+            f"trajectory dataloader: {len(traj_list)} trajs, max_len={self.max_len}, "
+            f"pad_idx={self.traj_pad_idx}, batch_size={batch_size}"
+        )
+
     def get_data(self):
         """
         返回数据的DataLoader，包括训练数据、测试数据、验证数据（同测试数据）
@@ -494,7 +552,9 @@ class HRNRDataset(AbstractDataset):
                 "lane_feature": self.lane_feature, "type_feature": self.type_feature,
                 "length_feature": self.length_feature, "node_feature": self.node_feature,
                 "struct_assign": self.struct_assign, "fnc_assign": self.fnc_assign,
-                "label_class":2, "lane_num":self.lane_num, "type_num":self.type_num, "length_num":self.length_num}
+                "label_class":2, "lane_num":self.lane_num, "type_num":self.type_num, "length_num":self.length_num,
+                "traj_dataloader": self.traj_dataloader, "traj_pad_idx": self.traj_pad_idx,
+                "traj_max_len": self.max_len}
 
     def _load_geo(self):
         pass

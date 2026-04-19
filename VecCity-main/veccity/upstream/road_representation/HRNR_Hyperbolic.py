@@ -82,6 +82,31 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
 
         self.node_emb, self.init_emb = None, None
 
+        # =============== Sequence 分支（可选） ===============
+        self.traj_dataloader = data_feature.get('traj_dataloader')
+        self.traj_pad_idx = data_feature.get('traj_pad_idx', hparams.node_num)
+        traj_max_len = data_feature.get('traj_max_len', config.get('max_len', 128))
+
+        if self.traj_dataloader is not None:
+            self.traj_encoder = HyperbolicTrajEncoder(
+                d=self.hyperbolic_dim,
+                max_len=traj_max_len,
+                n_layers=config.get('traj_n_layers', 2),
+                n_heads=config.get('traj_n_heads', 4),
+                dropout=config.get('traj_dropout', 0.1),
+                manifold=self.manifold,
+            ).to(self.device)
+            self._logger.info(
+                f"Sequence branch enabled (traj_max_len={traj_max_len}, "
+                f"pad_idx={self.traj_pad_idx})"
+            )
+        else:
+            self.traj_encoder = None
+        # 最近一次 sequence 前向产生的嵌入；预留给 step 2 的 MTR/TCL/align
+        self.seq_token_hyp_emb = None  # [B, T, d+1]
+        self.traj_hyp_emb = None       # [B, d+1]
+        # =====================================================
+
         self.model_cache_file = './veccity/cache/{}/model_cache/embedding_{}_{}_{}.m'. \
             format(self.exp_id, self.model, self.dataset, self.output_dim)
         self.road_embedding_path = './veccity/cache/{}/evaluate_cache/road_embedding_{}_{}_{}.npy'. \
@@ -100,6 +125,33 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         output_state = self.linear(output_state)
 
         return output_state
+
+    def traj_encode(self, seq, pad_mask):
+        """
+        Sequence 分支前向：把轨迹 (road-id 序列) 映射为 Lorentz 空间中的
+        逐位置嵌入 token_hyp 与轨迹级嵌入 traj_hyp。
+        复用 graph_enc.segment_hyp_emb 作为 token 表征来源。
+
+        Args:
+            seq:      [B, T] long, 含 pad_idx
+            pad_mask: [B, T] bool, True 为有效位
+        Returns:
+            token_hyp: [B, T, d+1]
+            traj_hyp:  [B, d+1]
+        """
+        if self.traj_encoder is None:
+            raise RuntimeError("sequence 分支未启用 (traj_encoder is None)")
+        # 确保 graph 前向已执行、segment_hyp_emb 可用
+        if self.graph_enc.segment_hyp_emb is None:
+            _ = self.graph_enc(
+                self.node_feature, self.type_feature,
+                self.length_feature, self.lane_feature, self.adj,
+            )
+        segment_emb = self.graph_enc.segment_hyp_emb
+        token_hyp, traj_hyp = self.traj_encoder(segment_emb, seq, pad_mask)
+        self.seq_token_hyp_emb = token_hyp
+        self.traj_hyp_emb = traj_hyp
+        return token_hyp, traj_hyp
 
     def _save_final_embeddings(self):
         """在训练结束时保存最终的embeddings"""
@@ -278,6 +330,7 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         model_optimizer = torch.optim.Adam(self.parameters(), lr=hparams.lp_learning_rate)
         eval_dataloader_iter = iter(eval_dataloader)
         patience = 50
+        traj_iter = iter(self.traj_dataloader) if self.traj_dataloader is not None else None
 
         for i in range(hparams.max_epoch):
             self._logger.info("epoch " + str(i) + ", processed " + str(count))
@@ -295,6 +348,19 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
 
                 # 对比损失
                 loss_cc = self.compute_contrastive_loss()
+
+                # Sequence 分支前向 (step 1 仅前向传播，不参与 loss；下一步接 MTR/TCL/align)
+                if self.traj_encoder is not None:
+                    traj_batch = get_next(traj_iter)
+                    if traj_batch is None:
+                        traj_iter = iter(self.traj_dataloader)
+                        traj_batch = get_next(traj_iter)
+                    if traj_batch is not None:
+                        seq_b, mask_b = traj_batch
+                        seq_b = seq_b.to(self.device)
+                        mask_b = mask_b.to(self.device).bool()
+                        # 前向即可；嵌入缓存到 self.seq_token_hyp_emb / self.traj_hyp_emb
+                        self.traj_encode(seq_b, mask_b)
 
                 # 总损失
                 loss = loss_struct + self.lambda_ce * loss_ce + self.lambda_cc * loss_cc
@@ -613,6 +679,76 @@ class HyperbolicGraphEncoderTLCore(Module):
         """计算双曲空间中的亲和度矩阵（批量 Minkowski）"""
         dist = self.manifold.pairwise_lorentz_distance(embeddings, embeddings)
         return torch.exp(-dist)
+
+
+class HyperbolicTrajEncoder(nn.Module):
+    """
+    切空间 Transformer 轨迹编码器：
+      1) 在原点对 Lorentz 输入做 log_map → 切空间表示
+      2) 加可学习的 positional embedding
+      3) 标准 Transformer encoder (batch_first)
+      4) 原点 exp_map 映回 Lorentz 空间
+      5) 对 padding 位做 mask，对轨迹级嵌入做 masked mean pool
+    """
+    def __init__(self, d, max_len, n_layers=2, n_heads=4, dropout=0.1, manifold=None):
+        super().__init__()
+        self.manifold = manifold if manifold is not None else LorentzManifold()
+        self.d = d
+        self.max_len = max_len
+
+        self.pos_emb = nn.Parameter(torch.zeros(max_len, d))
+        nn.init.trunc_normal_(self.pos_emb, std=0.02)
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d,
+            nhead=n_heads,
+            dim_feedforward=4 * d,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+
+    def forward(self, segment_hyp_emb, seq, pad_mask):
+        """
+        Args:
+            segment_hyp_emb: [N, d+1] graph-view Lorentz 嵌入
+            seq:             [B, T] long (含 pad_idx)
+            pad_mask:        [B, T] bool, True 为有效位
+        Returns:
+            token_hyp: [B, T, d+1]  Lorentz 空间逐位置嵌入
+            traj_hyp:  [B, d+1]     Lorentz 空间轨迹级嵌入
+        """
+        N = segment_hyp_emb.shape[0]
+        # Pad 位置用任意合法 id 兜底 (mask 会屏蔽其贡献)
+        safe_ids = seq.clamp(max=N - 1)
+        h = segment_hyp_emb[safe_ids]                       # [B, T, d+1]
+
+        # 原点切空间
+        v = self.manifold.origin_log_map(h)                 # [B, T, d+1], v[..., 0] == 0
+        v_space = v[..., 1:]                                # [B, T, d]
+
+        T = v_space.shape[1]
+        v_space = v_space + self.pos_emb[:T].unsqueeze(0)   # broadcast 到 [B, T, d]
+
+        key_padding_mask = ~pad_mask                        # True = ignore
+        out = self.transformer(v_space, src_key_padding_mask=key_padding_mask)  # [B, T, d]
+
+        # 逐位置 Lorentz 嵌入
+        zeros_time = torch.zeros_like(out[..., :1])
+        v_out = torch.cat([zeros_time, out], dim=-1)        # [B, T, d+1]
+        token_hyp = self.manifold.origin_exp_map(v_out)     # [B, T, d+1]
+
+        # 轨迹级嵌入 (masked mean in tangent space, then exp_map)
+        mask_f = pad_mask.unsqueeze(-1).float()             # [B, T, 1]
+        denom = mask_f.sum(dim=1).clamp(min=1.0)            # [B, 1]
+        traj_space = (out * mask_f).sum(dim=1) / denom      # [B, d]
+        traj_tangent = torch.cat(
+            [torch.zeros_like(traj_space[..., :1]), traj_space], dim=-1
+        )                                                    # [B, d+1]
+        traj_hyp = self.manifold.origin_exp_map(traj_tangent)
+        return token_hyp, traj_hyp
 
 
 # ========== 辅助函数和类 ==========
