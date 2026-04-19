@@ -73,6 +73,23 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         self.manifold = LorentzManifold()
         self.entailment_cone = EntailmentCone(self.manifold)
 
+        # Per-level learnable log-curvature (softplus > 0). Init at 0 → k=ln(2)≈0.69.
+        # Scaled Lorentz distance d_k = sqrt(k) * d acts as per-level curvature.
+        init_log_k = config.get('init_log_k', 0.5413)  # softplus(0.5413)=1.0
+        self.log_k_seg = nn.Parameter(torch.tensor(float(init_log_k)))
+        self.log_k_loc = nn.Parameter(torch.tensor(float(init_log_k)))
+        self.log_k_reg = nn.Parameter(torch.tensor(float(init_log_k)))
+
+        # Cross-view gate: sigmoid( MLP( [graph_emb; seq_emb] ) ) per position.
+        # Modulates how strongly L_align anchor is pulled from graph-view toward seq-view.
+        gate_hidden = config.get('xview_gate_hidden', 64)
+        d1 = self.hyperbolic_dim + 1
+        self.xview_gate = nn.Sequential(
+            nn.Linear(2 * d1, gate_hidden),
+            nn.GELU(),
+            nn.Linear(gate_hidden, 1),
+        ).to(self.device)
+
         edge = self.adj.indices()
         edge_e = torch.ones(edge.shape[1], dtype=torch.float).to(self.device)
         struct_inter = self.special_spmm(edge, edge_e, torch.Size([self.adj.shape[0], self.adj.shape[1]]),
@@ -162,6 +179,43 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         self.traj_hyp_emb = traj_hyp
         return token_hyp, traj_hyp
 
+    # ---------- Multi-curvature helpers ----------
+    def _k(self, level):
+        """Positive per-level curvature scalar."""
+        log_k = getattr(self, f'log_k_{level}')
+        return F.softplus(log_k) + 1e-6
+
+    def _sqrtk(self, level):
+        return torch.sqrt(self._k(level))
+
+    def _infonce(self, anchor, pos, neg, level):
+        """
+        Lorentz-distance InfoNCE with per-level curvature scaling.
+            anchor: [B, d+1]
+            pos:    [B, d+1]
+            neg:    [K, d+1]
+            level:  'seg' | 'loc' | 'reg'
+        """
+        s = self._sqrtk(level)
+        pos_dist = self.manifold.lorentz_distance(anchor, pos) * s          # [B]
+        neg_dist = self.manifold.pairwise_lorentz_distance(anchor, neg) * s # [B, K]
+        logits = torch.cat([-pos_dist.unsqueeze(1), -neg_dist], dim=1) / self.temperature
+        labels = torch.zeros(anchor.shape[0], dtype=torch.long, device=anchor.device)
+        return F.cross_entropy(logits, labels)
+
+    def _xview_reliability(self, graph_emb, seq_emb):
+        """
+        Cross-view sigmoid gate scoring per-position reliability of graph/seq
+        agreement. Used as a sample weight on the L_align InfoNCE term (not a
+        fusion — fusion on Lorentz is collapse-prone when paired with a
+        contrastive target).
+            shapes: graph_emb / seq_emb: [S, d+1]
+            returns: g: [S] in (0, 1)
+        """
+        return torch.sigmoid(
+            self.xview_gate(torch.cat([graph_emb, seq_emb], dim=-1))
+        ).squeeze(-1)
+
     def compute_seq_losses(self, seq, pad_mask):
         """
         Sequence 分支三个多样化预训练任务:
@@ -188,6 +242,7 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         N = segment_emb.shape[0]
         B, T = seq.shape
         tau = self.temperature
+        s_seg = self._sqrtk('seg')  # per-level curvature scaling for segment level
 
         # ---------- view A (unmasked) ----------
         token_A, traj_A = self.traj_encoder(segment_emb, seq, pad_mask)
@@ -203,28 +258,22 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
 
         # ==================== L_MTR ====================
         mp = mask_positions.nonzero(as_tuple=False)  # [P, 2]
-        P = mp.shape[0]
-        if P > 0:
+        if mp.shape[0] > 0:
             anchor = token_B[mp[:, 0], mp[:, 1]]              # [P, d+1]
             pos_ids = seq[mp[:, 0], mp[:, 1]].clamp(max=N - 1)
             pos_emb = segment_emb[pos_ids]                    # [P, d+1]
-
             K = min(self.mtr_neg_samples, N)
             neg_ids = torch.randint(0, N, (K,), device=self.device)
             neg_emb = segment_emb[neg_ids]                    # [K, d+1]
-
-            pos_dist = self.manifold.lorentz_distance(anchor, pos_emb)     # [P]
-            neg_dist = self.manifold.pairwise_lorentz_distance(anchor, neg_emb)  # [P, K]
-            logits = torch.cat([-pos_dist.unsqueeze(1), -neg_dist], dim=1) / tau
-            labels = torch.zeros(P, dtype=torch.long, device=self.device)
-            L_MTR = F.cross_entropy(logits, labels)
+            L_MTR = self._infonce(anchor, pos_emb, neg_emb, level='seg')
         else:
             L_MTR = zero
 
         # ==================== L_TCL ====================
         # 对称 InfoNCE: traj_A[i] 与 traj_B[i] 为正对, 其他轨迹为负
+        # 轨迹级仍居于 segment 曲率（trajectory 由 segment tokens 构成）
         if B > 1:
-            dist_ab = self.manifold.pairwise_lorentz_distance(traj_A, traj_B)  # [B, B]
+            dist_ab = self.manifold.pairwise_lorentz_distance(traj_A, traj_B) * s_seg  # [B, B]
             logits_ab = -dist_ab / tau
             labels_b = torch.arange(B, device=self.device)
             L_TCL = 0.5 * (
@@ -235,26 +284,31 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
             L_TCL = zero
 
         # ==================== L_align ====================
-        # graph-view segment_emb[seq] 与 seq-view token_A[pos] 对齐
+        # anchor=seq_view, pos=graph_view, with per-position reliability gate.
+        # Gate weights each sample's CE; regularizer keeps gate away from 0.
         valid = pad_mask.nonzero(as_tuple=False)  # [V, 2]
-        V = valid.shape[0]
-        if V > 0:
-            S = min(self.align_samples, V)
-            sel = torch.randperm(V, device=self.device)[:S]
+        if valid.shape[0] > 0:
+            S = min(self.align_samples, valid.shape[0])
+            sel = torch.randperm(valid.shape[0], device=self.device)[:S]
             vb = valid[sel]
-            anchor = token_A[vb[:, 0], vb[:, 1]]              # [S, d+1]
+            anchor = token_A[vb[:, 0], vb[:, 1]]               # [S, d+1] seq view
             pos_ids = seq[vb[:, 0], vb[:, 1]].clamp(max=N - 1)
-            pos_emb = segment_emb[pos_ids]                    # [S, d+1]
+            pos_emb = segment_emb[pos_ids]                     # [S, d+1] graph view (positive)
 
             K = min(self.align_neg_samples, N)
             neg_ids = torch.randint(0, N, (K,), device=self.device)
-            neg_emb = segment_emb[neg_ids]                    # [K, d+1]
+            neg_emb = segment_emb[neg_ids]                     # [K, d+1]
 
-            pos_dist = self.manifold.lorentz_distance(anchor, pos_emb)        # [S]
-            neg_dist = self.manifold.pairwise_lorentz_distance(anchor, neg_emb)  # [S, K]
+            pos_dist = self.manifold.lorentz_distance(anchor, pos_emb) * s_seg        # [S]
+            neg_dist = self.manifold.pairwise_lorentz_distance(anchor, neg_emb) * s_seg  # [S, K]
             logits = torch.cat([-pos_dist.unsqueeze(1), -neg_dist], dim=1) / tau
             labels = torch.zeros(S, dtype=torch.long, device=self.device)
-            L_align = F.cross_entropy(logits, labels)
+            per_sample = F.cross_entropy(logits, labels, reduction='none')  # [S]
+
+            g = self._xview_reliability(pos_emb, anchor)       # [S] in (0, 1)
+            gate_reg = self.config.get('xview_gate_reg', 0.01)
+            # Non-degenerate weighted CE: entropy-style reg keeps gate from collapsing to 0.
+            L_align = (g * per_sample).mean() - gate_reg * torch.log(g + 1e-6).mean()
         else:
             L_align = zero
 
@@ -370,57 +424,33 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         neg_pool_size = 64
         losses = []
 
-        # 1. Segment 层 InfoNCE
+        # 1. Segment 层 InfoNCE (curvature k_seg)
         edge_indices = self.adj.indices()
         num_edges = edge_indices.shape[1]
         if num_edges > 0:
             B = min(500, num_edges)
             sel = torch.randperm(num_edges, device=self.device)[:B]
-            anchors = edge_indices[0, sel]
-            positives = edge_indices[1, sel]
-
-            anchor_emb = segment_emb[anchors]                # [B, d+1]
-            pos_emb = segment_emb[positives]                 # [B, d+1]
-
+            anchor_emb = segment_emb[edge_indices[0, sel]]   # [B, d+1]
+            pos_emb = segment_emb[edge_indices[1, sel]]      # [B, d+1]
             neg_idx = torch.randint(
                 0, segment_emb.shape[0], (neg_pool_size,), device=self.device
             )
             neg_emb = segment_emb[neg_idx]                   # [K, d+1]
+            losses.append(self._infonce(anchor_emb, pos_emb, neg_emb, level='seg'))
 
-            pos_dist = self.manifold.lorentz_distance(anchor_emb, pos_emb)     # [B]
-            neg_dist = self.manifold.pairwise_lorentz_distance(anchor_emb, neg_emb)  # [B, K]
-
-            logits = torch.cat(
-                [-pos_dist.unsqueeze(1), -neg_dist], dim=1
-            ) / self.temperature                             # [B, K+1]
-            labels = torch.zeros(B, dtype=torch.long, device=self.device)
-            losses.append(F.cross_entropy(logits, labels))
-
-        # 2. 跨层 InfoNCE (Locality anchor <-> Segment positive)
+        # 2. 跨层 InfoNCE (Locality anchor <-> Segment positive, curvature k_loc)
         ls_pairs = (self.struct_assign > 0).nonzero(as_tuple=False)  # [K', 2]: (seg, loc)
         if ls_pairs.numel() > 0:
             M = min(500, ls_pairs.shape[0])
             sel = torch.randperm(ls_pairs.shape[0], device=self.device)[:M]
             sampled = ls_pairs[sel]
-            pos_seg_idx = sampled[:, 0]
-            anchor_loc_idx = sampled[:, 1]
-
-            anchor_emb = locality_emb[anchor_loc_idx]        # [M, d+1]
-            pos_emb = segment_emb[pos_seg_idx]               # [M, d+1]
-
+            anchor_emb = locality_emb[sampled[:, 1]]         # [M, d+1]
+            pos_emb = segment_emb[sampled[:, 0]]             # [M, d+1]
             neg_idx = torch.randint(
                 0, segment_emb.shape[0], (neg_pool_size,), device=self.device
             )
             neg_emb = segment_emb[neg_idx]                   # [K, d+1]
-
-            pos_dist = self.manifold.lorentz_distance(anchor_emb, pos_emb)     # [M]
-            neg_dist = self.manifold.pairwise_lorentz_distance(anchor_emb, neg_emb)  # [M, K]
-
-            logits = torch.cat(
-                [-pos_dist.unsqueeze(1), -neg_dist], dim=1
-            ) / self.temperature
-            labels = torch.zeros(M, dtype=torch.long, device=self.device)
-            losses.append(F.cross_entropy(logits, labels))
+            losses.append(self._infonce(anchor_emb, pos_emb, neg_emb, level='loc'))
 
         if len(losses) == 0:
             return torch.zeros((), device=self.device)
@@ -547,7 +577,10 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                         f"loss: {loss.item()}, struct: {loss_struct.item()}, "
                         f"ce: {loss_ce.item()}, cc: {loss_cc.item()}, "
                         f"mtr: {loss_mtr.item()}, tcl: {loss_tcl.item()}, "
-                        f"align: {loss_align.item()}"
+                        f"align: {loss_align.item()}, "
+                        f"k_seg: {self._k('seg').item():.3f}, "
+                        f"k_loc: {self._k('loc').item():.3f}, "
+                        f"k_reg: {self._k('reg').item():.3f}"
                     )
                 count += 1
 

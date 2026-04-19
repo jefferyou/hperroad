@@ -86,5 +86,10 @@
     "mtr_mask_ratio": 0.15,
     "mtr_neg_samples": 512,
     "align_samples": 500,
-    "align_neg_samples": 64
+    "align_neg_samples": 64,
+
+    "_comment_step4": "=== Step 4: multi-curvature + cross-view gate ===",
+    "init_log_k": 0.5413,
+    "xview_gate_hidden": 64,
+    "xview_gate_reg": 0.01
 }
