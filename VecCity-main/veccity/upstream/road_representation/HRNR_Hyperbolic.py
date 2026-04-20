@@ -52,7 +52,11 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         hparams.lane_num = data_feature.get("lane_num")
         hparams.length_num = data_feature.get("length_num")
         hparams.type_num = data_feature.get("type_num")
-        hparams.node_num = data_feature.get("num_nodes")
+        # node_feature stores geo_uid, which may not be contiguous — size the
+        # embedding table by max id to avoid CUDA index-out-of-bounds.
+        num_nodes = data_feature.get("num_nodes")
+        max_node_id = int(self.node_feature.max().item()) + 1
+        hparams.node_num = max(num_nodes, max_node_id)
 
         # 双曲空间参数
         self.hyperbolic_dim = config.get('hyperbolic_dim', self.hidden_dims)
