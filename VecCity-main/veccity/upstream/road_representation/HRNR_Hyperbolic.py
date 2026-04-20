@@ -16,9 +16,61 @@ from sklearn.metrics import roc_auc_score
 
 from veccity.upstream.abstract_replearning_model import AbstractReprLearningModel
 from veccity.upstream.road_representation.hyperbolic_utils import (
-    LorentzManifold, HyperbolicEmbedding, EntailmentCone, HyperbolicGraphConv
+    LorentzManifold, HyperbolicEmbedding, EntailmentCone, HyperbolicGraphConv,
+    adaptive_temperature,
 )
 import pdb
+
+
+class HyperbolicMomentumQueue(nn.Module):
+    """
+    FIFO Lorentz-space memory bank for large-scale contrastive negatives.
+    Keys are detached current-encoder outputs (memory-bank variant — no separate
+    key encoder, avoids doubling graph_enc cost). Used for:
+      (a) expanding InfoNCE negative pool (64 → thousands)
+      (b) hard negative mining via Lorentz-distance topk
+    """
+
+    def __init__(self, dim, size, device):
+        super().__init__()
+        self.size = int(size)
+        self.dim = int(dim)
+        # Initialize at Lorentz origin [1, 0, ..., 0]
+        init = torch.zeros(self.size, self.dim, device=device)
+        init[:, 0] = 1.0
+        self.register_buffer('queue', init)
+        self.register_buffer('queue_ptr', torch.zeros(1, dtype=torch.long, device=device))
+        self.register_buffer('queue_filled', torch.zeros(1, dtype=torch.long, device=device))
+
+    @torch.no_grad()
+    def enqueue(self, keys):
+        """Append `keys` ([B, d+1] Lorentz, detached) to the ring buffer."""
+        if keys.numel() == 0:
+            return
+        keys = keys.detach()
+        B = keys.shape[0]
+        ptr = int(self.queue_ptr.item())
+        if B >= self.size:
+            self.queue.copy_(keys[-self.size:])
+            self.queue_ptr[0] = 0
+            self.queue_filled[0] = self.size
+            return
+        end = ptr + B
+        if end <= self.size:
+            self.queue[ptr:end] = keys
+        else:
+            first = self.size - ptr
+            self.queue[ptr:] = keys[:first]
+            self.queue[:B - first] = keys[first:]
+        self.queue_ptr[0] = (ptr + B) % self.size
+        self.queue_filled[0] = min(self.size, int(self.queue_filled.item()) + B)
+
+    def get(self):
+        """Returns filled portion of queue, or None if empty."""
+        filled = int(self.queue_filled.item())
+        if filled == 0:
+            return None
+        return self.queue[:filled]
 
 
 class HRNR_Hyperbolic(AbstractReprLearningModel):
@@ -73,6 +125,47 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         self.align_samples = config.get('align_samples', 500)
         self.align_neg_samples = config.get('align_neg_samples', 64)
 
+        # ========== Phase 1: STS MR long-tail fix ==========
+        self.use_momentum_queue = config.get('use_momentum_queue', True)
+        self.queue_size = int(config.get('queue_size', 8192))
+        self.queue_enqueue_size = int(config.get('queue_enqueue_size', 256))
+        self.hard_neg_ratio = float(config.get('hard_neg_ratio', 0.5))
+        self.contrast_neg_samples = int(config.get('contrast_neg_samples', 256))
+        self.queue_warmup_steps = int(config.get('queue_warmup_steps', 50))
+        self.lambda_rank = float(config.get('lambda_rank', 0.05))
+        self.triplet_margin_base = float(config.get('triplet_margin_base', 0.2))
+        self.tau_min = float(config.get('tau_min', 0.03))
+        self.use_adaptive_tau = config.get('use_adaptive_tau', True)
+        self.rank_sample_pairs = int(config.get('rank_sample_pairs', 256))
+        self.rank_neg_samples = int(config.get('rank_neg_samples', 1024))
+        self._global_step = 0
+
+        # ========== Phase 2: TTE RMSE tail fix ==========
+        self.lambda_tte_aux = float(config.get('lambda_tte_aux', 0.05))
+        self.lambda_tt_robust = float(config.get('lambda_tt_robust', 0.05))
+        self.lambda_time_var = float(config.get('lambda_time_var', 0.03))
+        self.use_step_emb = config.get('use_step_emb', True)
+        self.n_step_buckets = int(config.get('n_step_buckets', 16))
+        self.huber_delta_ratio = float(config.get('huber_delta_ratio', 0.5))
+
+        # ========== Phase 3: trajectory memory + multi-level readout ==========
+        self.use_traj_memory = config.get('use_traj_memory', True)
+        self.traj_memory_momentum = float(config.get('traj_memory_momentum', 0.99))
+        self.use_multi_level_readout = config.get('use_multi_level_readout', True)
+        self.readout_alpha_init = float(config.get('readout_alpha_init', 0.2))
+        self.readout_beta_init = float(config.get('readout_beta_init', 0.1))
+        self.readout_gamma_init = float(config.get('readout_gamma_init', 0.2))
+
+        # ========== Phase 4: training strategy refinement ==========
+        self.curvature_warmup_epochs = int(config.get('curvature_warmup_epochs', 20))
+        self.curvature_init = float(config.get('curvature_init', 0.1))
+        self.log_k_lr_mult = float(config.get('log_k_lr_mult', 0.1))
+        self.hyp_grad_clip = float(config.get('hyp_grad_clip', 1.0))
+        self.use_loss_schedule = config.get('use_loss_schedule', True)
+        self.loss_stage1_epochs = int(config.get('loss_stage1_epochs', 30))
+        self.loss_stage2_epochs = int(config.get('loss_stage2_epochs', 70))
+        self._current_epoch = 0
+
         # 双曲空间工具
         self.manifold = LorentzManifold()
         self.entailment_cone = EntailmentCone(self.manifold)
@@ -112,12 +205,23 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
 
         self.node_emb, self.init_emb = None, None
 
+        # Phase 1: Lorentz momentum queue
+        if self.use_momentum_queue:
+            self.seg_queue = HyperbolicMomentumQueue(
+                dim=self.hyperbolic_dim + 1,
+                size=self.queue_size,
+                device=self.device,
+            )
+        else:
+            self.seg_queue = None
+
         # =============== Sequence 分支（可选） ===============
         self.traj_dataloader = data_feature.get('traj_dataloader')
         self.traj_pad_idx = data_feature.get('traj_pad_idx', hparams.node_num)
         traj_max_len = data_feature.get('traj_max_len', config.get('max_len', 128))
 
         if self.traj_dataloader is not None:
+            n_step_buckets = self.n_step_buckets if self.use_step_emb else 0
             self.traj_encoder = HyperbolicTrajEncoder(
                 d=self.hyperbolic_dim,
                 max_len=traj_max_len,
@@ -125,13 +229,65 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                 n_heads=config.get('traj_n_heads', 4),
                 dropout=config.get('traj_dropout', 0.1),
                 manifold=self.manifold,
+                n_step_buckets=n_step_buckets,
             ).to(self.device)
             self._logger.info(
                 f"Sequence branch enabled (traj_max_len={traj_max_len}, "
-                f"pad_idx={self.traj_pad_idx})"
+                f"pad_idx={self.traj_pad_idx}, step_buckets={n_step_buckets})"
             )
         else:
             self.traj_encoder = None
+
+        # ========== Phase 2: aux heads + targets ==========
+        d1 = self.hyperbolic_dim + 1
+        # Segment-level length recovery head (TTE-aligned info preservation)
+        self.head_seg_time_mu = nn.Sequential(
+            nn.Linear(d1, 64), nn.GELU(), nn.Linear(64, 1)
+        ).to(self.device)
+        # Segment-level variance-proxy head (uses topological degree as target)
+        self.head_seg_time_var = nn.Sequential(
+            nn.Linear(d1, 64), nn.GELU(), nn.Linear(64, 1)
+        ).to(self.device)
+        # Trajectory-level total-length head (Huber regression, TTE magnitude proxy)
+        self.head_tt_total = nn.Sequential(
+            nn.Linear(d1, 128), nn.GELU(), nn.Linear(128, 1)
+        ).to(self.device)
+
+        # Precompute normalized per-segment length & degree targets (used as TTE proxies
+        # because real trajectory timestamps are not exposed via traj_dataloader).
+        with torch.no_grad():
+            length_t = self.length_feature.float()
+            log_len = torch.log1p(length_t)
+            seg_len_norm = (log_len - log_len.mean()) / (log_len.std() + 1e-6)
+            self.register_buffer('_seg_len_target', seg_len_norm.detach().unsqueeze(-1))
+
+            # Degree from adjacency (as variance proxy: branchier segments → more time variance)
+            adj_indices = self.adj.indices()
+            N_all = self.adj.shape[0]
+            deg = torch.zeros(N_all, device=self.device)
+            ones = torch.ones(adj_indices.shape[1], device=self.device)
+            deg.index_add_(0, adj_indices[0], ones)
+            log_deg = torch.log1p(deg)
+            seg_deg_norm = (log_deg - log_deg.mean()) / (log_deg.std() + 1e-6)
+            self.register_buffer('_seg_deg_target', seg_deg_norm.detach().unsqueeze(-1))
+
+        # ========== Phase 3: trajectory memory + multi-level readout ==========
+        # Segment-wise EMA memory of tangent-space trajectory token embeddings.
+        # Carries trajectory semantics into segment representations without
+        # changing encode() interface.
+        if self.use_traj_memory:
+            N_all = self.length_feature.shape[0]
+            # Stored in tangent-at-origin (space dims only), zero-initialized
+            traj_mem = torch.zeros(N_all, self.hyperbolic_dim, device=self.device)
+            self.register_buffer('seg_traj_memory', traj_mem)
+            self.register_buffer('seg_traj_mem_init', torch.zeros(N_all, dtype=torch.bool, device=self.device))
+        else:
+            self.seg_traj_memory = None
+
+        # Learnable readout gates (in log-space to keep positive; softplus to blend)
+        self.readout_alpha = nn.Parameter(torch.tensor(float(np.log(np.exp(self.readout_alpha_init) - 1 + 1e-6))))
+        self.readout_beta = nn.Parameter(torch.tensor(float(np.log(np.exp(self.readout_beta_init) - 1 + 1e-6))))
+        self.readout_gamma = nn.Parameter(torch.tensor(float(np.log(np.exp(self.readout_gamma_init) - 1 + 1e-6))))
         # 最近一次 sequence 前向产生的嵌入；预留给 step 2 的 MTR/TCL/align
         self.seq_token_hyp_emb = None  # [B, T, d+1]
         self.traj_hyp_emb = None       # [B, d+1]
@@ -185,12 +341,72 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
 
     # ---------- Multi-curvature helpers ----------
     def _k(self, level):
-        """Positive per-level curvature scalar."""
+        """
+        Positive per-level curvature scalar with Phase-4 warmup.
+        Ramps effective k from `curvature_init` (Euclidean-ish) toward the
+        learned softplus(log_k) across `curvature_warmup_epochs` epochs.
+        """
         log_k = getattr(self, f'log_k_{level}')
-        return F.softplus(log_k) + 1e-6
+        k_learned = F.softplus(log_k) + 1e-6
+        if self.curvature_warmup_epochs > 0 and self._current_epoch < self.curvature_warmup_epochs:
+            progress = float(self._current_epoch) / float(self.curvature_warmup_epochs)
+            k_init_t = torch.tensor(self.curvature_init, device=k_learned.device, dtype=k_learned.dtype)
+            return k_init_t + progress * (k_learned - k_init_t)
+        return k_learned
 
     def _sqrtk(self, level):
         return torch.sqrt(self._k(level))
+
+    def _loss_schedule(self, epoch):
+        """
+        3-stage loss reweighting:
+          stage1 (warm-start)  : down-weight contrastive/entailment/rank/aux, stabilize base
+          stage2 (balanced)    : base weights from config
+          stage3 (specialize)  : up-weight rank + TTE-aux for task-specific fine-tuning
+        Returns dict of multipliers applied on top of base lambdas.
+        """
+        if not self.use_loss_schedule:
+            return {'ce': 1.0, 'cc': 1.0, 'rank': 1.0, 'mtr': 1.0, 'tcl': 1.0,
+                    'align': 1.0, 'tte': 1.0}
+        if epoch < self.loss_stage1_epochs:
+            return {'ce': 0.5, 'cc': 0.5, 'rank': 0.0, 'mtr': 1.0, 'tcl': 1.0,
+                    'align': 1.0, 'tte': 0.3}
+        if epoch < self.loss_stage2_epochs:
+            return {'ce': 1.0, 'cc': 1.0, 'rank': 1.0, 'mtr': 1.0, 'tcl': 1.0,
+                    'align': 1.0, 'tte': 1.0}
+        return {'ce': 1.0, 'cc': 1.2, 'rank': 2.0, 'mtr': 0.8, 'tcl': 0.8,
+                'align': 1.0, 'tte': 1.5}
+
+    def _build_optimizer(self, base_lr):
+        """
+        Phase 4: separate param groups so hyperbolic params (log_k_*, Lorentz
+        embedding layer, hyperbolic graph convs) train with a reduced lr.
+        """
+        hyp_params, other_params = [], []
+        hyp_keywords = ('log_k_', 'hyp_embedding', 'fnc_gcn', 'struct_gcn', 'node_gcn',
+                        'readout_alpha', 'readout_beta', 'readout_gamma')
+        for n, p in self.named_parameters():
+            if not p.requires_grad:
+                continue
+            if any(kw in n for kw in hyp_keywords):
+                hyp_params.append(p)
+            else:
+                other_params.append(p)
+        self._hyp_params_list = hyp_params
+        self._other_params_list = other_params
+        return torch.optim.Adam([
+            {'params': other_params, 'lr': base_lr},
+            {'params': hyp_params, 'lr': base_lr * self.log_k_lr_mult},
+        ])
+
+    def _tau(self, level):
+        """
+        Temperature: adaptive per level (scales with curvature) or fixed.
+        """
+        if self.use_adaptive_tau:
+            log_k = getattr(self, f'log_k_{level}')
+            return adaptive_temperature(log_k, self.temperature, self.tau_min)
+        return torch.tensor(self.temperature, device=self.device)
 
     def _infonce(self, anchor, pos, neg, level):
         """
@@ -201,11 +417,79 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
             level:  'seg' | 'loc' | 'reg'
         """
         s = self._sqrtk(level)
+        tau = self._tau(level)
         pos_dist = self.manifold.lorentz_distance(anchor, pos) * s          # [B]
         neg_dist = self.manifold.pairwise_lorentz_distance(anchor, neg) * s # [B, K]
-        logits = torch.cat([-pos_dist.unsqueeze(1), -neg_dist], dim=1) / self.temperature
+        logits = torch.cat([-pos_dist.unsqueeze(1), -neg_dist], dim=1) / tau
         labels = torch.zeros(anchor.shape[0], dtype=torch.long, device=anchor.device)
         return F.cross_entropy(logits, labels)
+
+    def _sample_negatives(self, anchor, exclude_ids, segment_emb, level='seg'):
+        """
+        Build a mixed negative pool:
+          • In-batch shuffled (always)
+          • Hard-mined from queue (via smallest Lorentz distance, exclude positives)
+          • Random from queue / segment pool
+        Args:
+            anchor: [B, d+1]
+            exclude_ids: [B] segment-ids to avoid when sampling (current positives)
+            segment_emb: [N, d+1] fallback pool
+        Returns:
+            neg: [K, d+1]
+        """
+        K_total = self.contrast_neg_samples
+        N_seg = segment_emb.shape[0]
+
+        use_queue = (
+            self.seg_queue is not None
+            and int(self.seg_queue.queue_filled.item()) >= self.queue_enqueue_size
+            and self._global_step >= self.queue_warmup_steps
+        )
+
+        if not use_queue:
+            # Cold start: random sample from segment pool
+            K_eff = min(K_total, N_seg)
+            idx = torch.randint(0, N_seg, (K_eff,), device=self.device)
+            return segment_emb[idx]
+
+        pool = self.seg_queue.get()  # [Q, d+1]
+        Q = pool.shape[0]
+        n_hard = int(K_total * self.hard_neg_ratio)
+        n_rand = K_total - n_hard
+
+        # Random negatives from queue
+        rand_idx = torch.randint(0, Q, (n_rand,), device=self.device)
+        rand_neg = pool[rand_idx]
+
+        if n_hard > 0:
+            # Hard negatives: for each anchor, find top-n_hard nearest in queue,
+            # aggregate a shared pool by union (with cap)
+            s = self._sqrtk(level)
+            with torch.no_grad():
+                # Subsample queue to bound cost when Q is very large
+                probe_cap = min(Q, 2048)
+                if Q > probe_cap:
+                    pidx = torch.randperm(Q, device=self.device)[:probe_cap]
+                    probe = pool[pidx]
+                else:
+                    probe = pool
+                dist = self.manifold.pairwise_lorentz_distance(anchor, probe) * s  # [B, P]
+                # Pick a few hardest per anchor then flatten & dedup
+                per_anchor_k = max(1, n_hard // max(1, anchor.shape[0]) + 2)
+                per_anchor_k = min(per_anchor_k, probe.shape[0])
+                _, top_idx = torch.topk(-dist, k=per_anchor_k, dim=1)  # smallest dist
+                flat = top_idx.flatten()
+                # Dedup & cap
+                flat = torch.unique(flat)
+                if flat.numel() > n_hard:
+                    sel = torch.randperm(flat.numel(), device=self.device)[:n_hard]
+                    flat = flat[sel]
+            hard_neg = probe[flat]
+            neg = torch.cat([hard_neg, rand_neg], dim=0)
+        else:
+            neg = rand_neg
+
+        return neg
 
     def _xview_reliability(self, graph_emb, seq_emb):
         """
@@ -337,7 +621,11 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                 self._logger.warning("Embeddings will be generated during evaluation instead")
                 return
 
-            node_embedding = self.graph_enc.segment_hyp_emb.data.cpu().numpy()
+            # Phase 3: use multi-level enriched embedding (shape unchanged [N, d+1])
+            enriched = self._build_enriched_segment_embedding()
+            if enriched is None:
+                enriched = self.graph_enc.segment_hyp_emb
+            node_embedding = enriched.data.cpu().numpy()
 
             # 确保目录存在
             embedding_dir = os.path.dirname(self.road_embedding_path)
@@ -418,47 +706,275 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
 
     def compute_contrastive_loss(self):
         """
-        层次对比学习损失 (批量向量化 InfoNCE)
-        1. Segment 层: 相邻为正对, 共享随机负样本池
-        2. 跨层: Locality 与其所属 Segment 为正对, 共享负样本池
+        Phase 1 hierarchical contrastive:
+          1. Segment-level InfoNCE with queue + hard-negative mining
+          2. Cross-level (Locality ↔ Segment) InfoNCE with mixed negatives
+        Temperature is curvature-adaptive when use_adaptive_tau=True.
+        Enqueues a random batch of current-segment Lorentz embeddings each call.
         """
         segment_emb = self.graph_enc.segment_hyp_emb         # [N, d+1]
         locality_emb = self.graph_enc.locality_hyp_emb       # [N_loc, d+1]
+        N_seg = segment_emb.shape[0]
 
-        neg_pool_size = 64
+        # Enqueue a random subset so that queue tracks the evolving encoder
+        if self.seg_queue is not None:
+            with torch.no_grad():
+                enq_k = min(self.queue_enqueue_size, N_seg)
+                enq_idx = torch.randperm(N_seg, device=self.device)[:enq_k]
+                self.seg_queue.enqueue(segment_emb[enq_idx])
+
         losses = []
 
-        # 1. Segment 层 InfoNCE (curvature k_seg)
+        # 1. Segment level: adjacent pairs as positives
         edge_indices = self.adj.indices()
         num_edges = edge_indices.shape[1]
         if num_edges > 0:
             B = min(500, num_edges)
             sel = torch.randperm(num_edges, device=self.device)[:B]
-            anchor_emb = segment_emb[edge_indices[0, sel]]   # [B, d+1]
-            pos_emb = segment_emb[edge_indices[1, sel]]      # [B, d+1]
-            neg_idx = torch.randint(
-                0, segment_emb.shape[0], (neg_pool_size,), device=self.device
-            )
-            neg_emb = segment_emb[neg_idx]                   # [K, d+1]
+            anchor_ids = edge_indices[0, sel]
+            pos_ids = edge_indices[1, sel]
+            anchor_emb = segment_emb[anchor_ids]
+            pos_emb = segment_emb[pos_ids]
+            neg_emb = self._sample_negatives(anchor_emb, pos_ids, segment_emb, level='seg')
             losses.append(self._infonce(anchor_emb, pos_emb, neg_emb, level='seg'))
 
-        # 2. 跨层 InfoNCE (Locality anchor <-> Segment positive, curvature k_loc)
+        # 2. Cross-level: Locality anchor <-> Segment positive
         ls_pairs = (self.struct_assign > 0).nonzero(as_tuple=False)  # [K', 2]: (seg, loc)
         if ls_pairs.numel() > 0:
             M = min(500, ls_pairs.shape[0])
             sel = torch.randperm(ls_pairs.shape[0], device=self.device)[:M]
             sampled = ls_pairs[sel]
-            anchor_emb = locality_emb[sampled[:, 1]]         # [M, d+1]
-            pos_emb = segment_emb[sampled[:, 0]]             # [M, d+1]
-            neg_idx = torch.randint(
-                0, segment_emb.shape[0], (neg_pool_size,), device=self.device
-            )
-            neg_emb = segment_emb[neg_idx]                   # [K, d+1]
+            anchor_emb = locality_emb[sampled[:, 1]]
+            pos_ids = sampled[:, 0]
+            pos_emb = segment_emb[pos_ids]
+            neg_emb = self._sample_negatives(anchor_emb, pos_ids, segment_emb, level='loc')
             losses.append(self._infonce(anchor_emb, pos_emb, neg_emb, level='loc'))
 
         if len(losses) == 0:
             return torch.zeros((), device=self.device)
         return torch.stack(losses).mean()
+
+    @torch.no_grad()
+    def _update_traj_memory(self, token_hyp, seq, pad_mask):
+        """
+        Phase 3: EMA update of per-segment trajectory memory in tangent-at-origin.
+        Args:
+            token_hyp: [B, T, d+1] Lorentz
+            seq:       [B, T] long
+            pad_mask:  [B, T] bool
+        """
+        if not self.use_traj_memory or self.seg_traj_memory is None:
+            return
+        if token_hyp is None or seq is None or pad_mask is None:
+            return
+
+        N = self.seg_traj_memory.shape[0]
+        # Flatten valid positions
+        mask_flat = pad_mask.reshape(-1)
+        idx_flat = seq.reshape(-1).clamp(max=N - 1)
+        # Work in origin tangent space (space dims only) — stable EMA there
+        tok_tangent = self.manifold.origin_log_map(token_hyp)[..., 1:]   # [B, T, d]
+        tok_flat = tok_tangent.reshape(-1, self.hyperbolic_dim)          # [B*T, d]
+
+        valid_idx = idx_flat[mask_flat]
+        valid_tok = tok_flat[mask_flat].detach()
+
+        if valid_idx.numel() == 0:
+            return
+
+        # For segments touched in this batch, aggregate mean of tokens, then EMA update
+        # Use index_add_ for mean accumulation
+        sum_buf = torch.zeros_like(self.seg_traj_memory)
+        cnt_buf = torch.zeros(N, device=self.device)
+        sum_buf.index_add_(0, valid_idx, valid_tok)
+        cnt_buf.index_add_(0, valid_idx, torch.ones_like(valid_idx, dtype=sum_buf.dtype))
+
+        touched = cnt_buf > 0
+        if not touched.any():
+            return
+        mean_buf = torch.zeros_like(self.seg_traj_memory)
+        mean_buf[touched] = sum_buf[touched] / cnt_buf[touched].unsqueeze(-1)
+
+        m = self.traj_memory_momentum
+        # Where not initialized yet: set directly to avoid slow cold-start
+        fresh = touched & ~self.seg_traj_mem_init
+        warm = touched & self.seg_traj_mem_init
+
+        if fresh.any():
+            self.seg_traj_memory[fresh] = mean_buf[fresh]
+            self.seg_traj_mem_init[fresh] = True
+        if warm.any():
+            self.seg_traj_memory[warm] = (
+                m * self.seg_traj_memory[warm] + (1.0 - m) * mean_buf[warm]
+            )
+
+    def _traj_memory_lorentz(self):
+        """Project current tangent-stored traj memory back to Lorentz at origin."""
+        if not self.use_traj_memory or self.seg_traj_memory is None:
+            return None
+        v_space = self.seg_traj_memory                                   # [N, d]
+        v_full = torch.cat([torch.zeros_like(v_space[..., :1]), v_space], dim=-1)
+        return self.manifold.origin_exp_map(v_full)                      # [N, d+1]
+
+    def _build_enriched_segment_embedding(self):
+        """
+        Phase 3: multi-level readout — fuse segment + locality + region + traj-memory
+        in the origin tangent space, then exp_map back to Lorentz.
+        Output shape is the same [N, d+1] as segment_hyp_emb so downstream code is
+        unchanged.
+        """
+        seg = self.graph_enc.segment_hyp_emb
+        if seg is None:
+            return None
+        if not self.use_multi_level_readout and not self.use_traj_memory:
+            return seg
+
+        N = seg.shape[0]
+        v_seg = self.manifold.origin_log_map(seg)                        # [N, d+1]
+
+        fused = v_seg.clone()
+        if self.use_multi_level_readout:
+            loc = self.graph_enc.locality_hyp_emb                        # [N_loc, d+1]
+            reg = self.graph_enc.region_hyp_emb                          # [N_reg, d+1]
+            if loc is not None:
+                loc_bcast = self.struct_assign @ self.manifold.origin_log_map(loc)  # [N, d+1]
+                alpha = F.softplus(self.readout_alpha)
+                fused = fused + alpha * loc_bcast
+            if reg is not None and loc is not None:
+                reg_bcast = (self.struct_assign @ self.fnc_assign) @ self.manifold.origin_log_map(reg)
+                beta = F.softplus(self.readout_beta)
+                fused = fused + beta * reg_bcast
+
+        if self.use_traj_memory and self.seg_traj_memory is not None:
+            init_mask = self.seg_traj_mem_init.unsqueeze(-1).float()     # [N, 1]
+            if init_mask.sum() > 0:
+                traj_L = self._traj_memory_lorentz()
+                v_traj = self.manifold.origin_log_map(traj_L)            # [N, d+1]
+                gamma = F.softplus(self.readout_gamma)
+                fused = fused + gamma * v_traj * init_mask
+
+        # Zero time component (tangent at origin invariant) then exp_map back
+        fused[..., 0] = 0.0
+        enriched = self.manifold.origin_exp_map(fused)
+        return enriched
+
+    def compute_tte_aux_loss(self, seq=None, pad_mask=None, traj_hyp=None):
+        """
+        Phase 2: TTE-aligned auxiliary losses targeting RMSE tail behavior.
+        Three heads, all operating on current Lorentz embeddings:
+
+        1. Segment length recovery (μ-head): predict normalized log(length) per segment.
+           Length correlates strongly with travel time; enforcing recoverability keeps
+           TTE-relevant information in segment_hyp_emb after graph encoding.
+
+        2. Segment degree prediction (variance-proxy head): predict normalized log(degree).
+           Branchier intersections have higher travel-time variance; this signal pushes
+           RMSE-relevant uncertainty into the representation.
+
+        3. Trajectory total-length (Huber): predict Σ length[seq[:]] from traj_hyp.
+           Huber δ tied to target median — robust to long-tail outliers that would
+           otherwise dominate RMSE during training.
+
+        Returns scalar tensor (0 if disabled or no data).
+        """
+        zero = torch.zeros((), device=self.device)
+        if self.lambda_tte_aux <= 0 and self.lambda_time_var <= 0 and self.lambda_tt_robust <= 0:
+            return zero
+
+        segment_emb = self.graph_enc.segment_hyp_emb  # [N, d+1]
+        if segment_emb is None:
+            return zero
+        N_seg = segment_emb.shape[0]
+
+        losses = []
+
+        # Head 1: segment length recovery
+        if self.lambda_tte_aux > 0 and self._seg_len_target is not None:
+            # Sample a subset to bound cost
+            B_s = min(4096, N_seg)
+            sel = torch.randperm(N_seg, device=self.device)[:B_s]
+            pred_mu = self.head_seg_time_mu(segment_emb[sel]).squeeze(-1)     # [B_s]
+            target_mu = self._seg_len_target[sel].squeeze(-1)                 # [B_s]
+            losses.append(self.lambda_tte_aux * F.smooth_l1_loss(pred_mu, target_mu))
+
+        # Head 2: variance proxy via degree
+        if self.lambda_time_var > 0 and self._seg_deg_target is not None:
+            B_s = min(4096, N_seg)
+            sel = torch.randperm(N_seg, device=self.device)[:B_s]
+            pred_var = self.head_seg_time_var(segment_emb[sel]).squeeze(-1)
+            target_var = self._seg_deg_target[sel].squeeze(-1)
+            losses.append(self.lambda_time_var * F.smooth_l1_loss(pred_var, target_var))
+
+        # Head 3: trajectory total-length Huber regression
+        if (
+            self.lambda_tt_robust > 0
+            and traj_hyp is not None
+            and seq is not None
+            and pad_mask is not None
+        ):
+            with torch.no_grad():
+                safe_seq = seq.clamp(max=N_seg - 1)
+                seg_len = self._seg_len_target.squeeze(-1)            # [N]
+                # Per-position normalized length, masked then summed per trajectory
+                per_pos_len = seg_len[safe_seq] * pad_mask.float()    # [B, T]
+                tt_target = per_pos_len.sum(dim=1)                    # [B]
+                # Robust delta: fraction of the absolute median magnitude
+                med = torch.median(tt_target.abs()) + 1e-6
+                delta = med * self.huber_delta_ratio
+
+            pred_tt = self.head_tt_total(traj_hyp).squeeze(-1)        # [B]
+            losses.append(self.lambda_tt_robust * F.huber_loss(
+                pred_tt, tt_target, delta=float(delta.item())
+            ))
+
+        if len(losses) == 0:
+            return zero
+        return torch.stack(losses).sum()
+
+    def compute_listwise_rank_loss(self):
+        """
+        Phase 1: Rank-aware hyperbolic triplet loss over large negative pool.
+        For each (anchor, pos) edge pair, penalize every negative whose
+        Lorentz distance is closer than (d_pos + margin).
+          L = mean_b[ mean_n( ReLU(d_pos - d_neg + m) ) ]
+        This directly targets Beijing STS MR long-tail (ACC@3 unaffected since
+        it only penalizes ordering errors in the tail).
+        """
+        if self.lambda_rank <= 0.0:
+            return torch.zeros((), device=self.device)
+
+        segment_emb = self.graph_enc.segment_hyp_emb
+        N_seg = segment_emb.shape[0]
+
+        edge_indices = self.adj.indices()
+        num_edges = edge_indices.shape[1]
+        if num_edges == 0:
+            return torch.zeros((), device=self.device)
+
+        B = min(self.rank_sample_pairs, num_edges)
+        sel = torch.randperm(num_edges, device=self.device)[:B]
+        anchor = segment_emb[edge_indices[0, sel]]
+        pos = segment_emb[edge_indices[1, sel]]
+
+        # Build a large negative pool (prefer queue)
+        if self.seg_queue is not None and int(self.seg_queue.queue_filled.item()) >= 512:
+            pool = self.seg_queue.get()
+            K_eff = min(self.rank_neg_samples, pool.shape[0])
+            idx = torch.randperm(pool.shape[0], device=self.device)[:K_eff]
+            neg = pool[idx]
+        else:
+            K_eff = min(self.rank_neg_samples, N_seg)
+            idx = torch.randint(0, N_seg, (K_eff,), device=self.device)
+            neg = segment_emb[idx]
+
+        s = self._sqrtk('seg')
+        d_pos = self.manifold.lorentz_distance(anchor, pos) * s              # [B]
+        d_neg = self.manifold.pairwise_lorentz_distance(anchor, neg) * s      # [B, K]
+
+        # Curvature-coupled margin: larger k → larger margin (distances spread out)
+        margin = self.triplet_margin_base * (1.0 + s.detach())
+        triplet = F.relu(d_pos.unsqueeze(1) - d_neg + margin)                 # [B, K]
+        return triplet.mean()
 
     def run(self, train_dataloader, eval_dataloader):
         """训练循环"""
@@ -468,13 +984,23 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         max_f1 = 0
         max_auc = 0
         count = 0
-        model_optimizer = torch.optim.Adam(self.parameters(), lr=hparams.lp_learning_rate)
+        # Phase 4: param-grouped optimizer (hyperbolic params get reduced lr)
+        model_optimizer = self._build_optimizer(hparams.lp_learning_rate)
+        self._logger.info(
+            f"Phase4 optimizer: other_params={len(self._other_params_list)}, "
+            f"hyp_params={len(self._hyp_params_list)} (lr_mult={self.log_k_lr_mult})"
+        )
         eval_dataloader_iter = iter(eval_dataloader)
         patience = 50
         traj_iter = iter(self.traj_dataloader) if self.traj_dataloader is not None else None
 
         for i in range(hparams.max_epoch):
-            self._logger.info("epoch " + str(i) + ", processed " + str(count))
+            self._current_epoch = i
+            sched = self._loss_schedule(i)
+            self._logger.info(
+                f"epoch {i}, processed {count}, sched={sched}, "
+                f"k_warmup={min(1.0, i / max(1, self.curvature_warmup_epochs)):.2f}"
+            )
             for step, (train_set, train_label) in enumerate(train_dataloader):
                 model_optimizer.zero_grad()
                 train_set = train_set.clone().detach().to(self.device)
@@ -490,10 +1016,15 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                 # 对比损失
                 loss_cc = self.compute_contrastive_loss()
 
+                # Phase 1: listwise rank loss for MR long-tail
+                loss_rank = self.compute_listwise_rank_loss()
+
                 # Sequence 分支: MTR / TCL / align 多任务
                 loss_mtr = torch.zeros((), device=self.device)
                 loss_tcl = torch.zeros((), device=self.device)
                 loss_align = torch.zeros((), device=self.device)
+                loss_tte = torch.zeros((), device=self.device)
+                last_seq, last_mask = None, None
                 if self.traj_encoder is not None:
                     traj_batch = get_next(traj_iter)
                     if traj_batch is None:
@@ -504,20 +1035,35 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                         seq_b = seq_b.to(self.device)
                         mask_b = mask_b.to(self.device).bool()
                         loss_mtr, loss_tcl, loss_align = self.compute_seq_losses(seq_b, mask_b)
+                        last_seq, last_mask = seq_b, mask_b
+                        # Phase 3: EMA-update per-segment trajectory memory
+                        self._update_traj_memory(self.seq_token_hyp_emb, seq_b, mask_b)
 
-                # 总损失
+                # Phase 2: TTE aux loss (segment μ/var + trajectory Huber)
+                loss_tte = self.compute_tte_aux_loss(
+                    seq=last_seq, pad_mask=last_mask, traj_hyp=self.traj_hyp_emb,
+                )
+
+                # Phase 4: scheduled per-loss multipliers
                 loss = (
                     loss_struct
-                    + self.lambda_ce * loss_ce
-                    + self.lambda_cc * loss_cc
-                    + self.lambda_mtr * loss_mtr
-                    + self.lambda_tcl * loss_tcl
-                    + self.lambda_align * loss_align
+                    + sched['ce'] * self.lambda_ce * loss_ce
+                    + sched['cc'] * self.lambda_cc * loss_cc
+                    + sched['rank'] * self.lambda_rank * loss_rank
+                    + sched['mtr'] * self.lambda_mtr * loss_mtr
+                    + sched['tcl'] * self.lambda_tcl * loss_tcl
+                    + sched['align'] * self.lambda_align * loss_align
+                    + sched['tte'] * loss_tte
                 )
 
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.parameters(), hparams.lp_clip)
+                # Phase 4: group-specific grad clipping — tighter bound for hyperbolic params
+                if self._hyp_params_list:
+                    torch.nn.utils.clip_grad_norm_(self._hyp_params_list, self.hyp_grad_clip)
+                if self._other_params_list:
+                    torch.nn.utils.clip_grad_norm_(self._other_params_list, hparams.lp_clip)
                 model_optimizer.step()
+                self._global_step += 1
 
                 if count % 20 == 0:
                     self._logger.info(f"=== DEBUG: Starting evaluation at count={count} ===")
@@ -537,7 +1083,11 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                         try:
                             self._logger.info(f"=== DEBUG: Accessing segment_hyp_emb ===")
                             self._logger.info(f"=== DEBUG: segment_hyp_emb type: {type(self.graph_enc.segment_hyp_emb)} ===")
-                            node_embedding = self.graph_enc.segment_hyp_emb.data.cpu().numpy()
+                            # Phase 3: save the enriched multi-level + traj-memory fused embedding
+                            enriched = self._build_enriched_segment_embedding()
+                            if enriched is None:
+                                enriched = self.graph_enc.segment_hyp_emb
+                            node_embedding = enriched.data.cpu().numpy()
                             # 确保evaluate_cache目录存在
                             embedding_dir = os.path.dirname(self.road_embedding_path)
                             self._logger.info(f"=== DEBUG: Creating directory: {embedding_dir} ===")
@@ -580,6 +1130,7 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
                     self._logger.info(
                         f"loss: {loss.item()}, struct: {loss_struct.item()}, "
                         f"ce: {loss_ce.item()}, cc: {loss_cc.item()}, "
+                        f"rank: {loss_rank.item()}, tte: {loss_tte.item()}, "
                         f"mtr: {loss_mtr.item()}, tcl: {loss_tcl.item()}, "
                         f"align: {loss_align.item()}, "
                         f"k_seg: {self._k('seg').item():.3f}, "
@@ -842,12 +1393,13 @@ class HyperbolicTrajEncoder(nn.Module):
     """
     切空间 Transformer 轨迹编码器：
       1) 在原点对 Lorentz 输入做 log_map → 切空间表示
-      2) 加可学习的 positional embedding
+      2) 加可学习的 positional embedding + Phase2 step-scale (Δt-proxy) 嵌入
       3) 标准 Transformer encoder (batch_first)
       4) 原点 exp_map 映回 Lorentz 空间
       5) 对 padding 位做 mask，对轨迹级嵌入做 masked mean pool
     """
-    def __init__(self, d, max_len, n_layers=2, n_heads=4, dropout=0.1, manifold=None):
+    def __init__(self, d, max_len, n_layers=2, n_heads=4, dropout=0.1, manifold=None,
+                 n_step_buckets=0):
         super().__init__()
         self.manifold = manifold if manifold is not None else LorentzManifold()
         self.d = d
@@ -855,6 +1407,22 @@ class HyperbolicTrajEncoder(nn.Module):
 
         self.pos_emb = nn.Parameter(torch.zeros(max_len, d))
         nn.init.trunc_normal_(self.pos_emb, std=0.02)
+
+        # Phase 2: Δt-proxy step-scale bucket embedding (log-bucketed token position).
+        # When actual timestamps are unavailable, log-position gives scale-aware
+        # information beyond the linear positional embedding.
+        self.n_step_buckets = int(n_step_buckets)
+        if self.n_step_buckets > 0:
+            self.step_emb = nn.Parameter(torch.zeros(self.n_step_buckets, d))
+            nn.init.trunc_normal_(self.step_emb, std=0.02)
+            # Precompute bucket id for each position: floor(log2(t+1)), clamped
+            bucket_ids = torch.zeros(max_len, dtype=torch.long)
+            for t in range(max_len):
+                b = int(np.floor(np.log2(t + 1))) if t > 0 else 0
+                bucket_ids[t] = min(b, self.n_step_buckets - 1)
+            self.register_buffer('step_bucket_ids', bucket_ids)
+        else:
+            self.step_emb = None
 
         # Learnable [MASK] token in tangent space (space dims only)
         self.mask_tangent = nn.Parameter(torch.zeros(d))
@@ -898,6 +1466,11 @@ class HyperbolicTrajEncoder(nn.Module):
 
         T = v_space.shape[1]
         v_space = v_space + self.pos_emb[:T].unsqueeze(0)   # broadcast 到 [B, T, d]
+        # Phase 2: add step-scale (log-bucketed) embedding
+        if self.step_emb is not None:
+            bucket_ids = self.step_bucket_ids[:T]            # [T]
+            step_e = self.step_emb[bucket_ids].unsqueeze(0)  # [1, T, d]
+            v_space = v_space + step_e
 
         key_padding_mask = ~pad_mask                        # True = ignore
         out = self.transformer(v_space, src_key_padding_mask=key_padding_mask)  # [B, T, d]

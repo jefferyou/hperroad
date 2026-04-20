@@ -431,6 +431,22 @@ class HyperbolicGraphConv(nn.Module):
         return out
 
 
+def adaptive_temperature(log_k, tau_base=0.07, tau_min=0.03):
+    """
+    Curvature-adaptive temperature for InfoNCE.
+    Larger curvature → sharper distance → smaller tau needed.
+    Args:
+        log_k: scalar tensor, pre-softplus curvature param
+        tau_base: base temperature
+        tau_min: floor temperature
+    Returns:
+        tau: scalar tensor
+    """
+    k = F.softplus(log_k) + 1e-6
+    tau = tau_base / (1.0 + torch.log(k + 1.0))
+    return torch.clamp(tau, min=tau_min)
+
+
 def create_hyperbolic_features(euclidean_features, dim, manifold=None):
     """
     辅助函数：批量创建双曲特征
