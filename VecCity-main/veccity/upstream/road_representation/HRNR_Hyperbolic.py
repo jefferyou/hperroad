@@ -108,7 +108,27 @@ class HRNR_Hyperbolic(AbstractReprLearningModel):
         # embedding table by max id to avoid CUDA index-out-of-bounds.
         num_nodes = data_feature.get("num_nodes")
         max_node_id = int(self.node_feature.max().item()) + 1
-        hparams.node_num = max(num_nodes, max_node_id)
+        # Sanity cap: if max_node_id is absurdly large (e.g. corrupted geo_uid
+        # or off-dataset hash value), fall back to num_nodes to avoid OOM on
+        # the nn.Embedding allocation. 10x num_nodes is a generous upper bound
+        # for realistic road networks with non-contiguous geo_uid gaps.
+        sane_upper = max(10 * num_nodes, 200_000)
+        if max_node_id > sane_upper:
+            self._logger.warning(
+                f"max_node_id={max_node_id} exceeds sane_upper={sane_upper} "
+                f"(num_nodes={num_nodes}); capping hparams.node_num to num_nodes. "
+                f"Remapping node_feature to 0..num_nodes-1."
+            )
+            # Remap node_feature to contiguous 0..num_nodes-1 via rank order
+            unique_ids, inverse = torch.unique(self.node_feature, return_inverse=True)
+            self.node_feature = inverse.to(self.node_feature.device)
+            hparams.node_num = max(num_nodes, int(unique_ids.numel()))
+        else:
+            hparams.node_num = max(num_nodes, max_node_id)
+        self._logger.info(
+            f"HRNR_Hyperbolic: num_nodes={num_nodes}, max_node_id={max_node_id}, "
+            f"hparams.node_num={hparams.node_num}, hparams.node_dims={hparams.node_dims}"
+        )
 
         # 双曲空间参数
         self.hyperbolic_dim = config.get('hyperbolic_dim', self.hidden_dims)
@@ -1205,6 +1225,18 @@ class HyperbolicGraphEncoderTL(Module):
         self.hyperbolic_dim = hyperbolic_dim
 
         # 原始特征嵌入（欧氏空间）
+        # Sanity guard: prevent runaway allocations if hparams got corrupted upstream.
+        for _name, _n in [
+            ('node_num', hparams.node_num), ('node_dims', hparams.node_dims),
+            ('type_num', hparams.type_num), ('type_dims', hparams.type_dims),
+            ('length_num', hparams.length_num), ('length_dims', hparams.length_dims),
+            ('lane_num', hparams.lane_num), ('lane_dims', hparams.lane_dims),
+        ]:
+            if not isinstance(_n, int) or _n <= 0 or _n > 10_000_000:
+                raise ValueError(
+                    f"HyperbolicGraphEncoderTL: hparams.{_name}={_n} is out of range "
+                    f"(expected positive int <= 10M). Aborting to avoid OOM."
+                )
         self.node_emb_layer = nn.Embedding(hparams.node_num, hparams.node_dims).to(self.device)
         self.type_emb_layer = nn.Embedding(hparams.type_num, hparams.type_dims).to(self.device)
         self.length_emb_layer = nn.Embedding(hparams.length_num, hparams.length_dims).to(self.device)
